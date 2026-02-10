@@ -127,6 +127,13 @@ def _format_slot(slot, tz) -> str:
     return line
 
 
+def _build_webhook_url(base_url: str, path: str) -> str:
+    base = base_url.rstrip("/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
+
+
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -257,10 +264,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-def _build_webhook_url(base_url: str, path: str) -> str:
-    base = base_url.rstrip("/")
-    if not path.startswith("/"):
-        path = f"/{path}"
-    return f"{base}{path}"
