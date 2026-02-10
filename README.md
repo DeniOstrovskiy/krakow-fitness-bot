@@ -8,6 +8,11 @@ Telegram bot that reads the public schedule page and returns this week's slots f
 
 ```bash
 pip install -r requirements.txt
+```
+
+If you plan to use Playwright (`USE_PLAYWRIGHT=1`), also run:
+
+```bash
 python -m playwright install
 ```
 
@@ -22,7 +27,7 @@ Single club option:
 Optional:
 - `EVENT_SELECTOR` if the parser does not detect events
 - `MAX_RESULTS`
-- `USE_PLAYWRIGHT=1` (recommended for these pages)
+- `USE_PLAYWRIGHT=1` (enable JS rendering if needed)
 - `PLAYWRIGHT_SEEK_WEEK=1` (auto-switch to current week)
 - `PLAYWRIGHT_MAX_STEPS=12` (max week navigation clicks)
 
@@ -31,6 +36,28 @@ Optional:
 ```bash
 python bot.py
 ```
+
+## Render (free Web Service)
+
+Render free tier works for Web Services. Use webhook mode:
+
+1. Create a Web Service from this repo.
+2. Build Command:
+   - `pip install -r requirements.txt`
+3. Start Command:
+   - `python3 bot.py`
+4. Environment variables:
+   - `BOT_TOKEN`
+   - `SCHEDULE_URLS`
+   - `CLUB_NAMES`
+   - `TIMEZONE=Europe/Warsaw`
+   - `USE_PLAYWRIGHT=0`
+   - Optional: `WEBHOOK_PATH=/telegram`
+   - Optional: `WEBHOOK_URL=https://your-service.onrender.com` (base URL only)
+
+Notes:
+- Render sets `RENDER_EXTERNAL_URL` automatically for Web Services; the bot will use it if `WEBHOOK_URL` is not set.
+- Free services sleep on inactivity; first reply can be delayed.
 
 ## How it works
 

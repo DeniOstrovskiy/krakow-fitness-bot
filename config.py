@@ -30,6 +30,11 @@ class Config:
     playwright_headless: bool
     playwright_seek_week: bool
     playwright_max_steps: int
+    webhook_base_url: str | None
+    webhook_path: str
+    webhook_listen_host: str
+    webhook_listen_port: int
+    drop_pending_updates: bool
 
 
 def load_config() -> Config:
@@ -56,6 +61,12 @@ def load_config() -> Config:
     playwright_headless = _parse_bool(os.getenv("PLAYWRIGHT_HEADLESS", "1"))
     playwright_seek_week = _parse_bool(os.getenv("PLAYWRIGHT_SEEK_WEEK", "1"))
     playwright_max_steps = int(os.getenv("PLAYWRIGHT_MAX_STEPS", "12"))
+    webhook_url_raw = os.getenv("WEBHOOK_URL", "").strip()
+    render_external_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    webhook_path_env = os.getenv("WEBHOOK_PATH", "").strip()
+    webhook_listen_host = os.getenv("WEBHOOK_LISTEN", "0.0.0.0").strip()
+    webhook_listen_port = int(os.getenv("PORT", os.getenv("WEBHOOK_PORT", "8080")))
+    drop_pending_updates = _parse_bool(os.getenv("DROP_PENDING_UPDATES", "1"))
 
     if not bot_token:
         raise ValueError("BOT_TOKEN is required")
@@ -85,6 +96,10 @@ def load_config() -> Config:
         for name, url, selector in zip(names, urls, selectors)
     ]
 
+    webhook_base_url, webhook_path = _resolve_webhook(
+        webhook_url_raw, render_external_url, webhook_path_env
+    )
+
     return Config(
         bot_token=bot_token,
         timezone=ZoneInfo(timezone_name),
@@ -98,6 +113,11 @@ def load_config() -> Config:
         playwright_headless=playwright_headless,
         playwright_seek_week=playwright_seek_week,
         playwright_max_steps=playwright_max_steps,
+        webhook_base_url=webhook_base_url,
+        webhook_path=webhook_path,
+        webhook_listen_host=webhook_listen_host,
+        webhook_listen_port=webhook_listen_port,
+        drop_pending_updates=drop_pending_updates,
     )
 
 
@@ -146,3 +166,29 @@ def _parse_bool(value: str | None) -> bool:
         return False
     normalized = value.strip().lower()
     return normalized in {"1", "true", "yes", "on"}
+
+
+def _resolve_webhook(
+    webhook_url_raw: str,
+    render_external_url: str,
+    webhook_path_env: str,
+) -> tuple[str | None, str]:
+    base_url = ""
+    path = ""
+    if webhook_url_raw:
+        parsed = urlparse(webhook_url_raw)
+        if parsed.scheme and parsed.netloc:
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            path = parsed.path or ""
+        else:
+            base_url = webhook_url_raw
+    elif render_external_url:
+        base_url = render_external_url
+
+    if not path:
+        path = webhook_path_env or "/telegram"
+
+    if not path.startswith("/"):
+        path = f"/{path}"
+
+    return (base_url.strip() or None), path

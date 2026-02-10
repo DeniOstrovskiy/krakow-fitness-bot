@@ -235,8 +235,32 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_query))
 
     logging.info("Bot started for %s clubs", len(cfg.clubs))
-    application.run_polling()
+    if cfg.webhook_base_url:
+        webhook_url = _build_webhook_url(cfg.webhook_base_url, cfg.webhook_path)
+        url_path = cfg.webhook_path.lstrip("/")
+        logging.info(
+            "Starting webhook at %s:%s %s",
+            cfg.webhook_listen_host,
+            cfg.webhook_listen_port,
+            webhook_url,
+        )
+        application.run_webhook(
+            listen=cfg.webhook_listen_host,
+            port=cfg.webhook_listen_port,
+            url_path=url_path,
+            webhook_url=webhook_url,
+            drop_pending_updates=cfg.drop_pending_updates,
+        )
+    else:
+        application.run_polling(drop_pending_updates=cfg.drop_pending_updates)
 
 
 if __name__ == "__main__":
     main()
+
+
+def _build_webhook_url(base_url: str, path: str) -> str:
+    base = base_url.rstrip("/")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
