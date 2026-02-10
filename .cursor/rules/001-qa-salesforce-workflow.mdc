@@ -1,0 +1,18 @@
+---
+description: "QA Salesforce: core workflow, terminology, and minimum checks"
+globs: *
+alwaysApply: true
+---
+
+# QA Salesforce: Core Workflow
+
+## Context
+- Any QA or testing task for Salesforce (Sales, Service, Experience, CPQ, etc.)
+- Requirements analysis, test design, testing, acceptance, regression
+
+## Rules
+- Always clarify: environment type (sandbox, dev, uat, prod), build or version, user profile or role, active permission sets, feature flags or org settings.
+- Use Salesforce terminology: objects, fields, record types, page layouts, validation rules, flows, process builder, apex triggers, profiles, permission sets, sharing rules.
+- Minimum checks: happy path, negative path, boundary values, access rights (CRUD and FLS), automation (Flows or Triggers), reports and dashboards, integrations (if any).
+- Provide a short checklist first, then a detailed plan if needed.
+- Prefer step by step scenarios over abstract advice.

@@ -1,0 +1,110 @@
+---
+description: "All in one rules for Salesforce QA and MuleSoft acceptance"
+globs: *
+alwaysApply: true
+version: "1.0.0"
+name: "QA Salesforce and MuleSoft All in One"
+---
+
+# QA Salesforce and MuleSoft - All in One Rules
+
+## Scope
+- Salesforce QA for manual testing, acceptance, and regression
+- MuleSoft API acceptance testing
+
+## Global rules
+- Always clarify environment, build or version, user role, profile, permission sets, and feature flags.
+- Use Salesforce terminology: objects, fields, record types, page layouts, validation rules, flows, apex triggers, profiles, permission sets, sharing rules.
+- Prefer step by step scenarios over abstract advice.
+- First provide a short checklist, then a detailed plan if needed.
+- Do not use the em dash character.
+
+## Salesforce testing focus areas
+- Standard objects: Account, Contact, Opportunity, Lead, Case
+- Custom objects and fields
+- Workflows, approval processes, business rules
+- Permissions and sharing rules
+- Lightning components
+- Integrations with external systems
+- Data validation and business logic
+
+## Salesforce testing best practices
+- Test case documentation with clear steps and expected results
+- End to end user journeys
+- Boundary value and negative testing
+- Regression after releases
+- Document test execution results
+
+## Salesforce authentication and environment assumptions
+- Manual login by users with their own credentials
+- No programmatic login or auth bypass in test cases
+- Focus on Lightning Experience unless Classic is mentioned
+- Default to sandbox environments
+
+## Test case format
+- ID
+- Title
+- Prerequisites
+- Test data setup
+- Steps
+- Expected results
+- Post conditions and cleanup
+- Priority or severity
+- Tags
+
+## Bug report format
+- Summary
+- Environment: org, sandbox, build or version, browser, user, profile, permission sets
+- Steps to reproduce
+- Expected result
+- Actual result
+- Impact or severity
+- Attachments: screenshots, video, logs
+- Related records: record IDs, object links
+
+## MuleSoft acceptance testing
+
+### Scope and context
+- UAT and business acceptance for MuleSoft APIs and integrations
+- Assume Anypoint Platform, CloudHub or Runtime Fabric unless stated otherwise
+
+### Always clarify
+- Environment: dev, test, uat, prod
+- Runtime: CloudHub, RTF, on prem
+- API type: System, Process, Experience
+- Auth: OAuth, Client ID and Secret, JWT, mTLS
+- SLA or performance targets
+- Version and deployment details
+- Test data sources and access
+
+### Acceptance focus areas
+- Business requirement coverage and end to end flow
+- Contract validation: RAML and examples
+- Data mapping and transformations using DataWeave
+- Error handling: status codes, error payloads, retries, timeouts
+- Idempotency and duplicate handling
+- Security: auth, scopes, IP allowlist, secrets handling
+- Observability: logs, correlation IDs, metrics
+- Performance and rate limits at agreed thresholds
+- Downstream dependencies and graceful degradation
+
+### Test design guidance
+- Start with a concise UAT checklist, then detailed scenarios
+- Provide step by step requests with sample payloads and headers
+- Include expected response body and status code
+- Include negative and boundary cases
+- Call out mocks or stubs used for downstream systems
+
+### Reporting
+- Record API name, version, environment, deployment id
+- Attach request and response samples
+- Include correlation ID or trace ID when available
+
+## Communication style
+- Use clear, simple language
+- Provide specific navigation steps in Salesforce
+- Suggest screenshots where visual verification is important
+- Ask clarifying questions when requirements are unclear
+
+## Tracking system
+- Keep outputs flexible to allow Jira, TestRail, or spreadsheets

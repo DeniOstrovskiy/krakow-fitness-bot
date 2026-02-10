@@ -1,0 +1,32 @@
+---
+description: "Salesforce test case template"
+globs: **/*.md,**/*.feature
+alwaysApply: false
+---
+
+# Test Case Template
+
+## Format
+- ID
+- Title
+- Preconditions
+- Test data
+- Steps
+- Expected result
+- Actual result (if available)
+- Priority or severity
+- Tags (object, feature, test type)
+
+## Example
+- ID: TC-ACC-001
+- Title: Create Account as Sales user
+- Preconditions: User with Sales profile, Record Type "Business" is enabled
+- Test data: Name=Acme, Industry=Manufacturing
+- Steps:
+  1. Open the Accounts tab.
+  2. Click New.
+  3. Fill in Name and Industry.
+  4. Save the record.
+- Expected result: Record is created, Record Type is Business, fields are accessible per FLS.
+- Priority or severity: P1/High
+- Tags: Account, UI, CRUD

@@ -1,0 +1,29 @@
+---
+description: "Salesforce bug report template"
+globs: **/*.md,**/*.txt
+alwaysApply: false
+---
+
+# Bug Report Template
+
+## Fields
+- Summary
+- Environment (org, sandbox, build or version, browser, user, profile, permission sets)
+- Steps to reproduce
+- Expected result
+- Actual result
+- Impact or severity
+- Attachments (screenshots, video, logs)
+- Related records (record IDs, object links)
+
+## Example
+- Summary: Unable to create Opportunity with Record Type "Enterprise" for Sales profile
+- Environment: UAT sandbox, build 2026.02.10, Chrome 122, user sales.qa, profile Sales, PS: Sales_Ext
+- Steps to reproduce:
+  1. Open Opportunities.
+  2. Click New.
+  3. Select Record Type "Enterprise".
+  4. Fill required fields and save.
+- Expected result: Opportunity is created.
+- Actual result: Validation error "Stage is required" even though Stage is filled.
+- Impact or severity: S2/High

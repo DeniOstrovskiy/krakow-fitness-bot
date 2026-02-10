@@ -1,0 +1,50 @@
+---
+description: "Acceptance testing rules for MuleSoft APIs"
+globs: **/*.raml,**/*.yaml,**/*.yml,**/*.xml,**/*.dwl,**/*.json
+alwaysApply: false
+version: "1.0.0"
+name: "MuleSoft Acceptance Rules"
+---
+
+# Acceptance Testing for MuleSoft
+
+## Scope and context
+- Focus on UAT and business acceptance for MuleSoft APIs and integrations
+- Assume MuleSoft Anypoint Platform, CloudHub or Runtime Fabric unless stated otherwise
+
+## Always clarify
+- Environment: dev, test, uat, prod
+- Runtime: CloudHub, RTF, on prem
+- API type: System, Process, Experience
+- Auth: OAuth, Client ID and Secret, JWT, mTLS
+- SLA or performance targets
+- Version and deployment details
+- Test data sources and access
+
+## Acceptance focus areas
+- Business requirements coverage and end to end flow
+- Contract validation: RAML and examples
+- Data mapping and transformations (DataWeave)
+- Error handling: status codes, error payloads, retries, timeouts
+- Idempotency and duplicate handling
+- Security: auth, scopes, IP allowlist, secrets handling
+- Observability: logs, correlation IDs, metrics
+- Performance and rate limits at agreed thresholds
+- Downstream dependencies and graceful degradation
+
+## Test design guidance
+- Start with a concise UAT checklist, then detailed scenarios
+- Provide step by step requests with sample payloads and headers
+- Include expected response body and status code
+- Include negative and boundary cases
+- Call out any mocks or stubs used for downstream systems
+
+## Reporting
+- Record API name, version, environment, deployment id
+- Attach request and response samples
+- Include correlation id or trace id when available
+
+## Communication style
+- Use clear, simple language
+- Provide concrete steps and payload examples
+- Ask clarifying questions when requirements are unclear
