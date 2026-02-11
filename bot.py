@@ -125,16 +125,39 @@ async def _handle_search(
     )
 
 
+STATUS_LABELS = {
+    "open": "✅ Запись открыта",
+    "full": "🚫 Нет мест",
+    "waitlist": "🟡 Лист ожидания",
+    "cancelled": "❌ Отменено",
+    "closed": "⛔ Запись закрыта",
+}
+
+
+def _capacity_badge(free: int) -> str:
+    if free <= 3:
+        return "🔴"
+    if free <= 8:
+        return "🟡"
+    return "🟢"
+
+
 def _format_slot(slot, tz, html_mode: bool = False) -> str:
     date_str = slot.start.astimezone(tz).strftime("%a %d.%m %H:%M")
-    status = f" [{slot.status}]" if slot.status else ""
     trainer = f" - {slot.trainer}" if slot.trainer else ""
-    capacity_text = ""
+    parts: list[str] = []
+
     if slot.capacity_total is not None and slot.capacity_used is not None:
         free = max(slot.capacity_total - slot.capacity_used, 0)
-        capacity_text = f" | мест: {slot.capacity_total}, свободно: {free}"
+        badge = _capacity_badge(free)
+        parts.append(f"Свободно: {badge} {free}/{slot.capacity_total}")
 
-    line = f"- {date_str} - {slot.name}{trainer}{status}{capacity_text}"
+    if slot.status:
+        parts.append(STATUS_LABELS.get(slot.status, f"Статус: {slot.status}"))
+
+    suffix = f" | {' | '.join(parts)}" if parts else ""
+
+    line = f"- {date_str} - {slot.name}{trainer}{suffix}"
     if getattr(slot, "url", None):
         line = f"{line} | {slot.url}"
 
@@ -144,13 +167,10 @@ def _format_slot(slot, tz, html_mode: bool = False) -> str:
     date_html = html.escape(date_str)
     name_html = html.escape(slot.name)
     trainer_html = f" - {html.escape(slot.trainer)}" if slot.trainer else ""
-    status_html = f" [{html.escape(slot.status)}]" if slot.status else ""
-    capacity_html = ""
-    if slot.capacity_total is not None and slot.capacity_used is not None:
-        free = max(slot.capacity_total - slot.capacity_used, 0)
-        capacity_html = f" | мест: {slot.capacity_total}, свободно: {free}"
+    parts_html = " | ".join(html.escape(part) for part in parts)
+    suffix_html = f" | {parts_html}" if parts_html else ""
     url_html = f" | {html.escape(slot.url)}" if getattr(slot, "url", None) else ""
-    return f"- <b>{date_html}</b> - <b>{name_html}</b>{trainer_html}{status_html}{capacity_html}{url_html}"
+    return f"- <b>{date_html}</b> - <b>{name_html}</b>{trainer_html}{suffix_html}{url_html}"
 
 
 def _build_webhook_url(base_url: str, path: str) -> str:
