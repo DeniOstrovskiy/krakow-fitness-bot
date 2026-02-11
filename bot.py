@@ -162,6 +162,18 @@ STATUS_LABELS = {
 }
 
 
+def _localize(dt: datetime, tz: ZoneInfo) -> datetime:
+    """Convert a datetime to the target timezone.
+
+    Naive datetimes (from HTML parsing) are treated as already being
+    in the target timezone, so we attach tzinfo without shifting.
+    Aware datetimes are converted normally.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+
 def _capacity_badge(free: int) -> str:
     if free <= 3:
         return "🔴"
@@ -171,7 +183,7 @@ def _capacity_badge(free: int) -> str:
 
 
 def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
-    date_str = slot.start.astimezone(tz).strftime("%a %d.%m %H:%M")
+    date_str = _localize(slot.start, tz).strftime("%a %d.%m %H:%M")
     trainer = f" - {slot.trainer}" if slot.trainer else ""
     parts: list[str] = []
 
@@ -239,8 +251,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lines.append(f"- На этой неделе: {week_count}")
 
         if schedule.slots:
-            earliest = min(schedule.slots, key=lambda s: s.start).start.astimezone(tz)
-            latest = max(schedule.slots, key=lambda s: s.start).start.astimezone(tz)
+            earliest = _localize(min(schedule.slots, key=lambda s: s.start).start, tz)
+            latest = _localize(max(schedule.slots, key=lambda s: s.start).start, tz)
             lines.append(
                 f"- Диапазон дат: {earliest.strftime('%d.%m.%Y')} - {latest.strftime('%d.%m.%Y')}"
             )
