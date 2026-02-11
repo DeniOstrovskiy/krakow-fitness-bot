@@ -108,10 +108,10 @@ async def _handle_search(
         club_name_html = html.escape(club.name)
         if mode == "trainer":
             slots = filter_slots_by_trainer(slots, query)
-            title = f"<b>{club_name_html}</b>: тренер {html.escape(query)} (эта неделя)"
+            title = f"🏋️ <b>{club_name_html}</b>: тренер {html.escape(query)} (эта неделя)"
         else:
             slots = filter_slots_by_name(slots, query)
-            title = f"<b>{club_name_html}</b>: {html.escape(query)} (эта неделя)"
+            title = f"🏋️ <b>{club_name_html}</b>: {html.escape(query)} (эта неделя)"
         slots.sort(key=lambda s: s.start)
 
         lines.append(title)
