@@ -155,11 +155,14 @@ def _format_slot(slot, tz, html_mode: bool = False) -> str:
     if slot.status:
         parts.append(STATUS_LABELS.get(slot.status, f"Статус: {slot.status}"))
 
-    suffix = f" | {' | '.join(parts)}" if parts else ""
+    if parts:
+        suffix = "\n" + "\n".join(parts)
+    else:
+        suffix = ""
 
     line = f"- {date_str} - {slot.name}{trainer}{suffix}"
     if getattr(slot, "url", None):
-        line = f"{line} | {slot.url}"
+        line = f"{line}\n{slot.url}"
 
     if not html_mode:
         return line
@@ -167,9 +170,9 @@ def _format_slot(slot, tz, html_mode: bool = False) -> str:
     date_html = html.escape(date_str)
     name_html = html.escape(slot.name)
     trainer_html = f" - {html.escape(slot.trainer)}" if slot.trainer else ""
-    parts_html = " | ".join(html.escape(part) for part in parts)
-    suffix_html = f" | {parts_html}" if parts_html else ""
-    url_html = f" | {html.escape(slot.url)}" if getattr(slot, "url", None) else ""
+    parts_html = "\n".join(html.escape(part) for part in parts)
+    suffix_html = f"\n{parts_html}" if parts_html else ""
+    url_html = f"\n{html.escape(slot.url)}" if getattr(slot, "url", None) else ""
     return f"- <b>{date_html}</b> - <b>{name_html}</b>{trainer_html}{suffix_html}{url_html}"
 
 
