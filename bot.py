@@ -225,8 +225,13 @@ def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
         else:
             parts.append(f"Свободно: {badge} {free}/{slot.capacity_total}")
 
-    if slot.status:
+    waitlist_overflow = (
+        slot.waitlist_used is not None and slot.waitlist_used >= _WAITLIST_LIMIT
+    )
+    if slot.status and not waitlist_overflow:
         parts.append(STATUS_LABELS.get(slot.status, f"Статус: {slot.status}"))
+    elif waitlist_overflow:
+        parts.append("🚫 Нет мест")
 
     if parts:
         suffix = "\n" + "\n".join(parts)
