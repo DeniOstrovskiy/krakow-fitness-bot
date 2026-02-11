@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 import html
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from config import load_config
@@ -53,6 +53,7 @@ async def _handle_search(
 
     any_success = False
     error_lines: list[str] = []
+    lines: list[str] = []
 
     for club in cfg.clubs:
         try:
@@ -88,30 +89,24 @@ async def _handle_search(
             title = f"{club.name}: {query} (эта неделя)"
         slots.sort(key=lambda s: s.start)
 
-        await update.message.reply_text(title)
+        lines.append(title)
+        lines.append("")
 
         if not slots:
-            await update.message.reply_text("Нет слотов на этой неделе.")
+            lines.append("Нет слотов на этой неделе.")
+            lines.append("")
             continue
 
         shown_slots = slots[: cfg.max_results]
         for idx, slot in enumerate(shown_slots):
-            keyboard = None
-            if getattr(slot, "url", None):
-                keyboard = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Записаться", url=slot.url)]]
-                )
-            await update.message.reply_text(
-                _format_slot(slot, tz, html_mode=True),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=keyboard,
-            )
+            lines.append(_format_slot(slot, tz, html_mode=True))
+            if idx < len(shown_slots) - 1:
+                lines.append("")
 
         if len(slots) > cfg.max_results:
-            await update.message.reply_text(
-                f"Показано {cfg.max_results} из {len(slots)} слотов."
-            )
+            lines.append("")
+            lines.append(f"Показано {cfg.max_results} из {len(slots)} слотов.")
+            lines.append("")
 
     if not any_success:
         if error_lines:
@@ -122,7 +117,16 @@ async def _handle_search(
         return
 
     if error_lines:
-        await update.message.reply_text("\n".join(error_lines))
+        lines.append("\n".join(error_lines))
+
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 STATUS_LABELS = {
