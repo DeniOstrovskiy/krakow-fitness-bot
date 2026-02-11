@@ -201,15 +201,23 @@ def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
     trainer = f" - {slot.trainer}" if slot.trainer else ""
     parts: list[str] = []
 
+    _WAITLIST_LIMIT = 10
+
     if slot.capacity_total is not None and slot.capacity_used is not None:
         free = max(slot.capacity_total - slot.capacity_used, 0)
         badge = _capacity_badge(free, slot.status)
         if slot.waitlist_used is not None:
             # We have real waitlist data from the detail page
-            parts.append(
-                f"Места: {badge} {slot.capacity_total}/{slot.capacity_total} - "
-                f"в листе ожидания: {slot.waitlist_used} чел."
-            )
+            if slot.waitlist_used >= _WAITLIST_LIMIT:
+                parts.append(
+                    f"Места: 🔴 {slot.capacity_total}/{slot.capacity_total} - нет мест, "
+                    f"в листе ожидания: {slot.waitlist_used} чел. (нельзя записаться)"
+                )
+            else:
+                parts.append(
+                    f"Места: {badge} {slot.capacity_total}/{slot.capacity_total} - "
+                    f"в листе ожидания: {slot.waitlist_used} чел."
+                )
         elif free == 0 and slot.status == "waitlist":
             parts.append(f"Места: {badge} {slot.capacity_used}/{slot.capacity_total} - лист ожидания")
         elif free == 0:
