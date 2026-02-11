@@ -130,7 +130,8 @@ async def _handle_search(
         if len(slots) > cfg.max_results:
             lines.append("")
             lines.append(f"Показано {cfg.max_results} из {len(slots)} слотов.")
-            lines.append("")
+
+        lines.append("")
 
     if not any_success:
         combined = list(error_lines)
