@@ -26,19 +26,19 @@ _MIN_QUERY_LENGTH = 2
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Отправь название тренировки (например: Yoga, Cross, Pilates), "
-        "и я пришлю слоты на эту неделю по всем выбранным клубам.\n"
-        "Если нужен конкретный тренер, напиши: `trainer: Имя Фамилия`.",
+        "Send a class name (e.g. Yoga, Cross, Pilates) "
+        "and I will return this week's slots across all configured clubs.\n"
+        "For a specific trainer, type: `trainer: First Last`.",
         parse_mode="Markdown",
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Просто отправь название тренировки. Я верну слоты на эту неделю по всем клубам.\n"
-        "Пример: `yoga` или `stretch`\n"
-        "Тренер: `trainer: Sebastian Buczek`\n"
-        "Диагностика: `/debug`",
+        "Just send a class name. I will return this week's slots for all clubs.\n"
+        "Example: `yoga` or `stretch`\n"
+        "Trainer: `trainer: Sebastian Buczek`\n"
+        "Diagnostics: `/debug`",
         parse_mode="Markdown",
     )
 
@@ -83,12 +83,12 @@ async def _handle_search(
     mode: str,
 ) -> None:
     if not query or len(query) < _MIN_QUERY_LENGTH:
-        await update.message.reply_text("Нужна хотя бы пара букв в запросе.")
+        await update.message.reply_text("Please enter at least a couple of characters.")
         return
 
     cfg = context.bot_data["config"]
     if cfg.use_playwright:
-        await update.message.reply_text("Секунду, собираю расписание...")
+        await update.message.reply_text("One moment, fetching the schedule...")
     tz = cfg.timezone
     now = datetime.now(tz)
 
@@ -101,7 +101,7 @@ async def _handle_search(
             schedule = await _fetch_club_schedule(club, cfg, now)
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch schedule for %s", club.url)
-            error_lines.append(f"{club.name}: ошибка загрузки расписания.")
+            error_lines.append(f"{club.name}: failed to load schedule.")
             continue
 
         any_success = True
@@ -109,17 +109,17 @@ async def _handle_search(
         club_name_html = html.escape(club.name)
         if mode == "trainer":
             slots = filter_slots_by_trainer(slots, query)
-            title = f"🏋️ <b>{club_name_html}</b>: тренер {html.escape(query)} (эта неделя)"
+            title = f"🏋️ <b>{club_name_html}</b>: trainer {html.escape(query)} (this week)"
         else:
             slots = filter_slots_by_name(slots, query)
-            title = f"🏋️ <b>{club_name_html}</b>: {html.escape(query)} (эта неделя)"
+            title = f"🏋️ <b>{club_name_html}</b>: {html.escape(query)} (this week)"
         slots.sort(key=lambda s: s.start)
 
         lines.append(title)
         lines.append("")
 
         if not slots:
-            lines.append("Нет слотов на этой неделе.")
+            lines.append("No slots this week.")
             lines.append("")
             continue
 
@@ -140,13 +140,13 @@ async def _handle_search(
 
         if len(slots) > cfg.max_results:
             lines.append("")
-            lines.append(f"Показано {cfg.max_results} из {len(slots)} слотов.")
+            lines.append(f"Showing {cfg.max_results} of {len(slots)} slots.")
 
         lines.append("")
 
     if not any_success:
         combined = list(error_lines)
-        combined.append("Не удалось загрузить расписание. Проверь ссылки и попробуй еще раз.")
+        combined.append("Failed to load the schedule. Please check the links and try again.")
         await update.message.reply_text("\n".join(combined))
         return
 
@@ -164,11 +164,11 @@ async def _handle_search(
 
 
 STATUS_LABELS = {
-    "open": "✅ Запись открыта",
-    "full": "🚫 Нет мест",
-    "waitlist": "🟡 Лист ожидания (можно записаться)",
-    "cancelled": "❌ Отменено",
-    "closed": "⛔ Запись закрыта",
+    "open": "✅ Booking open",
+    "full": "🚫 No spots",
+    "waitlist": "🟡 Waitlist (you can sign up)",
+    "cancelled": "❌ Cancelled",
+    "closed": "⛔ Booking closed",
 }
 
 
@@ -210,20 +210,20 @@ def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
             # We have real waitlist data from the detail page
             if slot.waitlist_used >= _WAITLIST_LIMIT:
                 parts.append(
-                    f"Места: 🔴 {slot.capacity_total}/{slot.capacity_total} - нет мест, "
-                    f"в листе ожидания: {slot.waitlist_used} чел. (нельзя записаться)"
+                    f"Spots: 🔴 {slot.capacity_total}/{slot.capacity_total} - no spots, "
+                    f"waitlist: {slot.waitlist_used} people (cannot sign up)"
                 )
             else:
                 parts.append(
-                    f"Места: {badge} {slot.capacity_total}/{slot.capacity_total} - "
-                    f"в листе ожидания: {slot.waitlist_used} чел."
+                    f"Spots: {badge} {slot.capacity_total}/{slot.capacity_total} - "
+                    f"waitlist: {slot.waitlist_used} people"
                 )
         elif free == 0 and slot.status == "waitlist":
-            parts.append(f"Места: {badge} {slot.capacity_used}/{slot.capacity_total} - лист ожидания")
+            parts.append(f"Spots: {badge} {slot.capacity_used}/{slot.capacity_total} - waitlist")
         elif free == 0:
-            parts.append(f"Места: {badge} {slot.capacity_used}/{slot.capacity_total} - нет мест")
+            parts.append(f"Spots: {badge} {slot.capacity_used}/{slot.capacity_total} - no spots")
         else:
-            parts.append(f"Свободно: {badge} {free}/{slot.capacity_total}")
+            parts.append(f"Available: {badge} {free}/{slot.capacity_total}")
 
     waitlist_overflow = (
         slot.waitlist_used is not None and slot.waitlist_used >= _WAITLIST_LIMIT
@@ -231,7 +231,7 @@ def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
     if slot.status and not waitlist_overflow:
         parts.append(STATUS_LABELS.get(slot.status, f"Статус: {slot.status}"))
     elif waitlist_overflow:
-        parts.append("🚫 Нет мест")
+        parts.append("🚫 No spots")
 
     if parts:
         suffix = "\n" + "\n".join(parts)
@@ -269,14 +269,14 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     tz = cfg.timezone
     now = datetime.now(tz)
     lines: list[str] = []
-    await update.message.reply_text("Секунду, проверяю расписание...")
+    await update.message.reply_text("One moment, checking the schedule...")
 
     for club in cfg.clubs:
         try:
             schedule = await _fetch_club_schedule(club, cfg, now)
         except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch schedule for %s", club.url)
-            lines.append(f"{club.name}: ошибка загрузки расписания.")
+            lines.append(f"{club.name}: failed to load schedule.")
             lines.append("")
             continue
 
@@ -284,19 +284,19 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         week_slots = filter_slots_for_week(schedule.slots, now)
         week_count = len(week_slots)
         lines.append(f"{club.name}:")
-        lines.append(f"- Сырых элементов: {schedule.raw_count}")
-        lines.append(f"- Найдено занятий с датой: {total_slots}")
-        lines.append(f"- На этой неделе: {week_count}")
+        lines.append(f"- Raw elements: {schedule.raw_count}")
+        lines.append(f"- Classes with date: {total_slots}")
+        lines.append(f"- This week: {week_count}")
 
         if schedule.slots:
             earliest = _localize(min(schedule.slots, key=lambda s: s.start).start, tz)
             latest = _localize(max(schedule.slots, key=lambda s: s.start).start, tz)
             lines.append(
-                f"- Диапазон дат: {earliest.strftime('%d.%m.%Y')} - {latest.strftime('%d.%m.%Y')}"
+                f"- Date range: {earliest.strftime('%d.%m.%Y')} - {latest.strftime('%d.%m.%Y')}"
             )
 
         if week_slots:
-            lines.append("- Примеры (эта неделя):")
+            lines.append("- Examples (this week):")
             for slot in week_slots[: min(5, cfg.max_results)]:
                 lines.append(_format_slot(slot, tz))
 
@@ -313,7 +313,7 @@ async def trainer_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     query = " ".join(context.args).strip()
     if not query:
-        await update.message.reply_text("Напиши имя тренера после команды. Например: /trainer Sebastian Buczek")
+        await update.message.reply_text("Please provide a trainer name. Example: /trainer Sebastian Buczek")
         return
     await _handle_search(update, context, query, mode="trainer")
 
