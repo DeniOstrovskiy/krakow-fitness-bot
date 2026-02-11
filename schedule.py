@@ -13,6 +13,9 @@ import requests
 from bs4 import BeautifulSoup
 
 
+# ---------------------------------------------------------------------------
+# Compiled regex patterns
+# ---------------------------------------------------------------------------
 TIME_RE = re.compile(r"\b([01]\d|2[0-3])[:.][0-5]\d\b")
 DATE_RE_NUM = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{4}))?\b")
 DATE_RE_WORD = re.compile(r"\b(\d{1,2})\s+([A-Za-z\u00C0-\u017F]+)\b")
@@ -20,6 +23,13 @@ ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 ISO_DATETIME_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})")
 UNIX_TS_RE = re.compile(r"\b(\d{10}|\d{13})\b")
 CAPACITY_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+
+# ---------------------------------------------------------------------------
+# Parsing limits
+# ---------------------------------------------------------------------------
+_MAX_EVENT_TEXT_LEN = 220
+_DATE_CONTEXT_MAX_DEPTH = 50
+_YEAR_BOUNDARY_MONTHS = 6
 
 MONTHS_ASCII = {
     "stycznia": 1,
@@ -192,23 +202,25 @@ def _parse_datetime_from_attrs(tag) -> Optional[datetime]:
 
 def _adjust_year(today: date, month: int, year: int) -> int:
     # If the schedule crosses a year boundary (e.g., Dec -> Jan), adjust forward.
-    if year == today.year and month < today.month and (today.month - month) > 6:
+    if year == today.year and month < today.month and (today.month - month) > _YEAR_BOUNDARY_MONTHS:
         return year + 1
     return year
 
 
 def _find_date_context(tag, today: date) -> Optional[date]:
-    # Look at current tag, then previous siblings, then parents' previous siblings.
+    """Walk up the DOM (current tag -> previous siblings -> parent) looking for a date.
+
+    Stops after ``_DATE_CONTEXT_MAX_DEPTH`` nodes to avoid runaway traversal.
+    """
     checked = 0
     node = tag
-    while node is not None and checked < 50:
+    while node is not None and checked < _DATE_CONTEXT_MAX_DEPTH:
         text = node.get_text(" ", strip=True)
         found = _parse_date(text, today)
         if found:
             return found
-        # Previous siblings
         prev = node.previous_sibling
-        while prev is not None and checked < 50:
+        while prev is not None and checked < _DATE_CONTEXT_MAX_DEPTH:
             checked += 1
             if hasattr(prev, "get_text"):
                 text = prev.get_text(" ", strip=True)
@@ -273,7 +285,7 @@ def _event_candidates(soup: BeautifulSoup, selector: Optional[str]) -> list:
         text = tag.get_text(" ", strip=True)
         if not TIME_RE.search(text):
             continue
-        if len(text) > 220:
+        if len(text) > _MAX_EVENT_TEXT_LEN:
             continue
         # Skip tags that contain smaller tags with their own time
         has_time_child = False
@@ -613,62 +625,60 @@ async def _fetch_html_playwright(
     timeout_ms = timeout_s * 1000
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=headless)
-        context = await browser.new_context(
-            user_agent=user_agent,
-            locale="pl-PL",
-        )
-        page = await context.new_page()
-        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        await _maybe_accept_cookies(page)
-        await _try_set_week_view(page)
-        await _try_click_today(page)
-        # Avoid long waits: a short pause is usually enough for the schedule widget.
-        await page.wait_for_timeout(1000)
+        try:
+            context = await browser.new_context(
+                user_agent=user_agent,
+                locale="pl-PL",
+            )
+            page = await context.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await _maybe_accept_cookies(page)
+            await _try_set_week_view(page)
+            await _try_click_today(page)
+            # Avoid long waits: a short pause is usually enough for the schedule widget.
+            await page.wait_for_timeout(1000)
 
-        if wait_selector:
-            try:
-                await page.wait_for_selector(wait_selector, timeout=timeout_ms)
-            except Exception:  # noqa: BLE001
-                logging.debug("Wait selector not found: %s", wait_selector)
-        else:
-            fast_timeout = min(5000, max(1500, timeout_ms // 3))
-            await _wait_for_any_selector(page, DEFAULT_WAIT_SELECTORS, fast_timeout)
+            if wait_selector:
+                try:
+                    await page.wait_for_selector(wait_selector, timeout=timeout_ms)
+                except Exception:  # noqa: BLE001
+                    logging.debug("Wait selector not found: %s", wait_selector)
+            else:
+                fast_timeout = min(5000, max(1500, timeout_ms // 3))
+                await _wait_for_any_selector(page, DEFAULT_WAIT_SELECTORS, fast_timeout)
 
-        if seek_week:
-            now_dt = datetime.combine(today, time.min)
-            week_start, week_end = week_range(now_dt)
-            for _ in range(max_steps + 1):
-                content = await page.content()
-                result = _parse_slots_from_html(content, selector, today)
-                if result.slots:
-                    week_slots = filter_slots_for_week(result.slots, now_dt)
-                    if week_slots:
-                        await browser.close()
-                        return content
+            if seek_week:
+                now_dt = datetime.combine(today, time.min)
+                week_start, week_end = week_range(now_dt)
+                for _ in range(max_steps + 1):
+                    content = await page.content()
+                    result = _parse_slots_from_html(content, selector, today, url)
+                    if result.slots:
+                        week_slots = filter_slots_for_week(result.slots, now_dt)
+                        if week_slots:
+                            return content
 
-                    earliest = min(result.slots, key=lambda s: s.start).start
-                    latest = max(result.slots, key=lambda s: s.start).start
-                    if earliest > week_end:
-                        moved = await _click_prev(page)
-                    elif latest < week_start:
-                        moved = await _click_next(page)
-                    else:
-                        await browser.close()
-                        return content
+                        earliest = min(result.slots, key=lambda s: s.start).start
+                        latest = max(result.slots, key=lambda s: s.start).start
+                        if earliest > week_end:
+                            moved = await _click_prev(page)
+                        elif latest < week_start:
+                            moved = await _click_next(page)
+                        else:
+                            return content
 
-                    if not moved:
-                        await browser.close()
-                        return content
+                        if not moved:
+                            return content
 
-                    await page.wait_for_timeout(700)
-                    continue
+                        await page.wait_for_timeout(700)
+                        continue
 
-                # No slots parsed; return whatever we have
-                break
+                    # No slots parsed; return whatever we have
+                    break
 
-        content = await page.content()
-        await browser.close()
-        return content
+            return await page.content()
+        finally:
+            await browser.close()
 
 
 async def fetch_schedule(

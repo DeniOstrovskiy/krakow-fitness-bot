@@ -4,24 +4,18 @@ import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 from config import load_config
+from schedule import _click_first, _maybe_accept_cookies
 
 
-API_HINT_RE = re.compile(r"(api|graphql|schedule|timetable|grafik|lesson|class|event|calendar|plan)", re.I)
+API_HINT_RE = re.compile(
+    r"(api|graphql|schedule|timetable|grafik|lesson|class|event|calendar|plan)",
+    re.I,
+)
 
-COOKIE_SELECTORS = [
-    "button:has-text(\"Zaakceptuj i zamknij\")",
-    "button:has-text(\"Zaakceptuj\")",
-    "button:has-text(\"Akceptuj\")",
-    "button:has-text(\"Akcept\")",
-    "button:has-text(\"Zgadzam\")",
-    "button:has-text(\"Accept\")",
-    "button:has-text(\"OK\")",
-    "button:has-text(\"Rozumiem\")",
-    "button:has-text(\"Zamknij\")",
-]
+_BODY_PREVIEW_LIMIT = 1200
+_PAGE_LOAD_WAIT_MS = 14_000
 
 
 @dataclass
@@ -33,19 +27,6 @@ class LoggedResponse:
     resource_type: str
     method: str
     request_post: str | None
-
-
-async def _click_first(page, selectors: Iterable[str]) -> bool:
-    for selector in selectors:
-        locator = page.locator(selector)
-        try:
-            if await locator.count() == 0:
-                continue
-            await locator.first.click()
-            return True
-        except Exception:
-            continue
-    return False
 
 
 def _should_log(url: str, content_type: str, resource_type: str) -> bool:
@@ -60,7 +41,7 @@ def _should_log(url: str, content_type: str, resource_type: str) -> bool:
     return False
 
 
-def _sanitize(text: str, limit: int = 1200) -> str:
+def _sanitize(text: str, limit: int = _BODY_PREVIEW_LIMIT) -> str:
     text = text.strip()
     if len(text) > limit:
         return text[:limit] + "..."
@@ -124,10 +105,9 @@ async def main() -> None:
 
             page.on("response", lambda resp: asyncio.create_task(handle_response(resp)))
 
-            await page.goto(club.url, wait_until="domcontentloaded", timeout=60000)
-            await _click_first(page, COOKIE_SELECTORS)
-            await page.wait_for_timeout(8000)
-            await page.wait_for_timeout(6000)
+            await page.goto(club.url, wait_until="domcontentloaded", timeout=60_000)
+            await _maybe_accept_cookies(page)
+            await page.wait_for_timeout(_PAGE_LOAD_WAIT_MS)
 
             html = await page.content()
             (out_dir / f"{slug}.html").write_text(html, encoding="utf-8")

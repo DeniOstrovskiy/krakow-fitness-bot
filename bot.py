@@ -8,13 +8,19 @@ import html
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-from config import load_config
+from zoneinfo import ZoneInfo
+
+from config import Config, ClubSchedule, load_config
 from schedule import (
+    ScheduleResult,
+    Slot,
     fetch_schedule,
     filter_slots_by_name,
     filter_slots_by_trainer,
     filter_slots_for_week,
 )
+
+_MIN_QUERY_LENGTH = 2
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -35,13 +41,47 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode="Markdown",
     )
 
+
+# ---------------------------------------------------------------------------
+# Shared fetch helper
+# ---------------------------------------------------------------------------
+
+async def _fetch_club_schedule(
+    club: ClubSchedule,
+    cfg: Config,
+    now: datetime,
+) -> ScheduleResult:
+    """Fetch schedule for a single club with a timeout budget."""
+    timeout_budget = cfg.playwright_timeout_s + 10 + (cfg.playwright_max_steps * 3)
+    return await asyncio.wait_for(
+        fetch_schedule(
+            club.url,
+            user_agent=cfg.user_agent,
+            selector=club.selector,
+            timeout_s=cfg.playwright_timeout_s,
+            use_playwright=cfg.use_playwright,
+            playwright_wait_selector=cfg.playwright_wait_selector,
+            playwright_headless=cfg.playwright_headless,
+            playwright_timeout_s=cfg.playwright_timeout_s,
+            now=now,
+            playwright_seek_week=cfg.playwright_seek_week,
+            playwright_max_steps=cfg.playwright_max_steps,
+        ),
+        timeout=timeout_budget,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Search handler
+# ---------------------------------------------------------------------------
+
 async def _handle_search(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     query: str,
     mode: str,
 ) -> None:
-    if not query or len(query) < 2:
+    if not query or len(query) < _MIN_QUERY_LENGTH:
         await update.message.reply_text("Нужна хотя бы пара букв в запросе.")
         return
 
@@ -57,24 +97,8 @@ async def _handle_search(
 
     for club in cfg.clubs:
         try:
-            timeout_budget = cfg.playwright_timeout_s + 10 + (cfg.playwright_max_steps * 3)
-            schedule = await asyncio.wait_for(
-                fetch_schedule(
-                    club.url,
-                    user_agent=cfg.user_agent,
-                    selector=club.selector,
-                    timeout_s=cfg.playwright_timeout_s,
-                    use_playwright=cfg.use_playwright,
-                    playwright_wait_selector=cfg.playwright_wait_selector,
-                    playwright_headless=cfg.playwright_headless,
-                    playwright_timeout_s=cfg.playwright_timeout_s,
-                    now=now,
-                    playwright_seek_week=cfg.playwright_seek_week,
-                    playwright_max_steps=cfg.playwright_max_steps,
-                ),
-                timeout=timeout_budget,
-            )
-        except Exception as exc:  # noqa: BLE001
+            schedule = await _fetch_club_schedule(club, cfg, now)
+        except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch schedule for %s", club.url)
             error_lines.append(f"{club.name}: ошибка загрузки расписания.")
             continue
@@ -109,11 +133,9 @@ async def _handle_search(
             lines.append("")
 
     if not any_success:
-        if error_lines:
-            await update.message.reply_text("\n".join(error_lines))
-        await update.message.reply_text(
-            "Не удалось загрузить расписание. Проверь ссылки и попробуй еще раз."
-        )
+        combined = list(error_lines)
+        combined.append("Не удалось загрузить расписание. Проверь ссылки и попробуй еще раз.")
+        await update.message.reply_text("\n".join(combined))
         return
 
     if error_lines:
@@ -146,7 +168,7 @@ def _capacity_badge(free: int) -> str:
     return "🟢"
 
 
-def _format_slot(slot, tz, html_mode: bool = False) -> str:
+def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
     date_str = slot.start.astimezone(tz).strftime("%a %d.%m %H:%M")
     trainer = f" - {slot.trainer}" if slot.trainer else ""
     parts: list[str] = []
@@ -199,24 +221,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     for club in cfg.clubs:
         try:
-            timeout_budget = cfg.playwright_timeout_s + 10 + (cfg.playwright_max_steps * 3)
-            schedule = await asyncio.wait_for(
-                fetch_schedule(
-                    club.url,
-                    user_agent=cfg.user_agent,
-                    selector=club.selector,
-                    timeout_s=cfg.playwright_timeout_s,
-                    use_playwright=cfg.use_playwright,
-                    playwright_wait_selector=cfg.playwright_wait_selector,
-                    playwright_headless=cfg.playwright_headless,
-                    playwright_timeout_s=cfg.playwright_timeout_s,
-                    now=now,
-                    playwright_seek_week=cfg.playwright_seek_week,
-                    playwright_max_steps=cfg.playwright_max_steps,
-                ),
-                timeout=timeout_budget,
-            )
-        except Exception as exc:  # noqa: BLE001
+            schedule = await _fetch_club_schedule(club, cfg, now)
+        except Exception:  # noqa: BLE001
             logging.exception("Failed to fetch schedule for %s", club.url)
             lines.append(f"{club.name}: ошибка загрузки расписания.")
             lines.append("")
