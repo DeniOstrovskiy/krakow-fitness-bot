@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 import html
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from config import load_config
@@ -51,8 +51,8 @@ async def _handle_search(
     tz = cfg.timezone
     now = datetime.now(tz)
 
-    lines: list[str] = []
     any_success = False
+    error_lines: list[str] = []
 
     for club in cfg.clubs:
         try:
@@ -75,8 +75,7 @@ async def _handle_search(
             )
         except Exception as exc:  # noqa: BLE001
             logging.exception("Failed to fetch schedule for %s", club.url)
-            lines.append(f"{club.name}: ошибка загрузки расписания.")
-            lines.append("")
+            error_lines.append(f"{club.name}: ошибка загрузки расписания.")
             continue
 
         any_success = True
@@ -89,40 +88,41 @@ async def _handle_search(
             title = f"{club.name}: {query} (эта неделя)"
         slots.sort(key=lambda s: s.start)
 
-        lines.append(title)
-        lines.append("")
+        await update.message.reply_text(title)
 
         if not slots:
-            lines.append("Нет слотов на этой неделе.")
-            lines.append("")
+            await update.message.reply_text("Нет слотов на этой неделе.")
             continue
 
         shown_slots = slots[: cfg.max_results]
         for idx, slot in enumerate(shown_slots):
-            lines.append(_format_slot(slot, tz, html_mode=True))
-            if idx < len(shown_slots) - 1:
-                lines.append("")
+            keyboard = None
+            if getattr(slot, "url", None):
+                keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Записаться", url=slot.url)]]
+                )
+            await update.message.reply_text(
+                _format_slot(slot, tz, html_mode=True),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=keyboard,
+            )
 
         if len(slots) > cfg.max_results:
-            lines.append("")
-            lines.append(f"Показано {cfg.max_results} из {len(slots)} слотов.")
-
-        lines.append("")
+            await update.message.reply_text(
+                f"Показано {cfg.max_results} из {len(slots)} слотов."
+            )
 
     if not any_success:
+        if error_lines:
+            await update.message.reply_text("\n".join(error_lines))
         await update.message.reply_text(
             "Не удалось загрузить расписание. Проверь ссылки и попробуй еще раз."
         )
         return
 
-    while lines and not lines[-1].strip():
-        lines.pop()
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
+    if error_lines:
+        await update.message.reply_text("\n".join(error_lines))
 
 
 STATUS_LABELS = {
