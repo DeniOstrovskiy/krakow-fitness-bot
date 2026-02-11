@@ -46,20 +46,22 @@ MONTHS_ASCII = {
     "grudnia": 12,
 }
 
+# Order matters: more specific phrases MUST come before shorter ones
+# (e.g. "lista rezerwowa" before "zapisz sie", "zamkniete zapisy" before "zapisy").
 STATUS_KEYWORDS = {
-    "zarezerwuj": "open",
-    "rezerwuj": "open",
-    "zapisz sie": "open",
-    "brak miejsc": "full",
     "lista rezerwowa": "waitlist",
+    "brak miejsc": "full",
+    "odwolane zajecia": "cancelled",
     "odwolane": "cancelled",
     "odwolana": "cancelled",
     "odwolany": "cancelled",
-    "odwolane zajecia": "cancelled",
-    "zapisy": "open",
     "zamkniete zapisy": "closed",
-    "za wczesnie": "closed",
     "termin rejestracji minal": "closed",
+    "za wczesnie": "closed",
+    "zarezerwuj": "open",
+    "rezerwuj": "open",
+    "zapisz sie": "open",
+    "zapisy": "open",
 }
 
 
@@ -560,6 +562,15 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
         item_url = item.get("data-url")
         absolute_url = urljoin(base_url, item_url) if item_url else None
         capacity_used, capacity_total = _parse_capacity(item)
+
+        # If class is full but still bookable, it's actually a waitlist
+        if (
+            status == "open"
+            and capacity_used is not None
+            and capacity_total is not None
+            and capacity_used >= capacity_total
+        ):
+            status = "waitlist"
 
         slots.append(
             Slot(
