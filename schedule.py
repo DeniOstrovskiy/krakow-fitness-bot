@@ -73,6 +73,8 @@ class Slot:
     url: Optional[str]
     capacity_used: Optional[int]
     capacity_total: Optional[int]
+    waitlist_used: Optional[int] = None
+    waitlist_total: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -573,6 +575,78 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
         )
 
     return slots, len(items)
+
+
+def _fetch_waitlist_details(
+    url: str,
+    user_agent: str,
+    timeout_s: int = 10,
+) -> tuple[Optional[int], Optional[int]]:
+    """Fetch the detail page for a class and extract real capacity (including waitlist).
+
+    Returns (real_used, total) where real_used can exceed total when people are
+    on the waitlist.  For example (38, 35) means 3 people on waitlist.
+    Returns (None, None) on any failure.
+    """
+    try:
+        html_text = _fetch_html_requests(url, user_agent, timeout_s)
+    except Exception:  # noqa: BLE001
+        return None, None
+
+    soup = BeautifulSoup(html_text, "lxml")
+
+    # The detail page has a #rezerwacja section with capacity like "38/35"
+    rez = soup.select_one("#rezerwacja")
+    if rez is None:
+        rez = soup
+
+    users_tag = rez.select_one(".users")
+    if users_tag is None:
+        users_tag = rez.find("span", attrs={"data-icon-alt": re.compile("uczest", re.I)})
+    if users_tag is None:
+        return None, None
+
+    text = users_tag.get_text(" ", strip=True)
+    match = CAPACITY_RE.search(text)
+    if not match:
+        return None, None
+
+    try:
+        return int(match.group(1)), int(match.group(2))
+    except ValueError:
+        return None, None
+
+
+async def enrich_waitlist_slots(
+    slots: list[Slot],
+    user_agent: str,
+    timeout_s: int = 10,
+) -> list[Slot]:
+    """For slots with waitlist status and a URL, fetch the detail page
+    to get the real capacity numbers (including waitlist overflow)."""
+    enriched: list[Slot] = []
+    for slot in slots:
+        if slot.status == "waitlist" and slot.url:
+            real_used, real_total = await asyncio.to_thread(
+                _fetch_waitlist_details, slot.url, user_agent, timeout_s
+            )
+            if real_used is not None and real_total is not None and real_used > real_total:
+                waitlist_used = real_used - real_total
+                # We don't know the max waitlist size, so leave waitlist_total as None
+                slot = Slot(
+                    name=slot.name,
+                    start=slot.start,
+                    status=slot.status,
+                    trainer=slot.trainer,
+                    raw=slot.raw,
+                    url=slot.url,
+                    capacity_used=real_used,
+                    capacity_total=real_total,
+                    waitlist_used=waitlist_used,
+                    waitlist_total=None,
+                )
+        enriched.append(slot)
+    return enriched
 
 
 def _slug_to_name(value: str) -> str:

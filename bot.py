@@ -14,6 +14,7 @@ from config import Config, ClubSchedule, load_config
 from schedule import (
     ScheduleResult,
     Slot,
+    enrich_waitlist_slots,
     fetch_schedule,
     filter_slots_by_name,
     filter_slots_by_trainer,
@@ -122,7 +123,16 @@ async def _handle_search(
             lines.append("")
             continue
 
+        # Fetch waitlist details for full classes (only for shown slots)
         shown_slots = slots[: cfg.max_results]
+        has_waitlist = any(s.status == "waitlist" and s.url for s in shown_slots)
+        if has_waitlist:
+            try:
+                shown_slots = await enrich_waitlist_slots(
+                    shown_slots, cfg.user_agent, timeout_s=10
+                )
+            except Exception:  # noqa: BLE001
+                logging.debug("Failed to enrich waitlist slots")
         for idx, slot in enumerate(shown_slots):
             lines.append(_format_slot(slot, tz, html_mode=True))
             if idx < len(shown_slots) - 1:
@@ -156,7 +166,7 @@ async def _handle_search(
 STATUS_LABELS = {
     "open": "✅ Запись открыта",
     "full": "🚫 Нет мест",
-    "waitlist": "🟡 Лист ожидания",
+    "waitlist": "🟡 Лист ожидания (можно записаться)",
     "cancelled": "❌ Отменено",
     "closed": "⛔ Запись закрыта",
 }
@@ -174,7 +184,11 @@ def _localize(dt: datetime, tz: ZoneInfo) -> datetime:
     return dt.astimezone(tz)
 
 
-def _capacity_badge(free: int) -> str:
+def _capacity_badge(free: int, status: str | None = None) -> str:
+    if free <= 0:
+        if status == "waitlist":
+            return "🟡"
+        return "🔴"
     if free <= 3:
         return "🔴"
     if free <= 8:
@@ -189,8 +203,19 @@ def _format_slot(slot: Slot, tz: ZoneInfo, html_mode: bool = False) -> str:
 
     if slot.capacity_total is not None and slot.capacity_used is not None:
         free = max(slot.capacity_total - slot.capacity_used, 0)
-        badge = _capacity_badge(free)
-        parts.append(f"Свободно: {badge} {free}/{slot.capacity_total}")
+        badge = _capacity_badge(free, slot.status)
+        if slot.waitlist_used is not None:
+            # We have real waitlist data from the detail page
+            parts.append(
+                f"Места: {badge} {slot.capacity_total}/{slot.capacity_total} - "
+                f"в листе ожидания: {slot.waitlist_used} чел."
+            )
+        elif free == 0 and slot.status == "waitlist":
+            parts.append(f"Места: {badge} {slot.capacity_used}/{slot.capacity_total} - лист ожидания")
+        elif free == 0:
+            parts.append(f"Места: {badge} {slot.capacity_used}/{slot.capacity_total} - нет мест")
+        else:
+            parts.append(f"Свободно: {badge} {free}/{slot.capacity_total}")
 
     if slot.status:
         parts.append(STATUS_LABELS.get(slot.status, f"Статус: {slot.status}"))
