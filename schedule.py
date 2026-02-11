@@ -19,6 +19,7 @@ DATE_RE_WORD = re.compile(r"\b(\d{1,2})\s+([A-Za-z\u00C0-\u017F]+)\b")
 ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 ISO_DATETIME_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})")
 UNIX_TS_RE = re.compile(r"\b(\d{10}|\d{13})\b")
+CAPACITY_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 MONTHS_ASCII = {
     "stycznia": 1,
@@ -60,6 +61,8 @@ class Slot:
     trainer: Optional[str]
     raw: str
     url: Optional[str]
+    capacity_used: Optional[int]
+    capacity_total: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -470,6 +473,8 @@ def _parse_slots_from_html(
                 trainer=trainer,
                 raw=text,
                 url=None,
+                capacity_used=None,
+                capacity_total=None,
             )
         )
 
@@ -540,6 +545,7 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
 
         item_url = item.get("data-url")
         absolute_url = urljoin(base_url, item_url) if item_url else None
+        capacity_used, capacity_total = _parse_capacity(item)
 
         slots.append(
             Slot(
@@ -549,6 +555,8 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
                 trainer=trainer,
                 raw=raw_text,
                 url=absolute_url,
+                capacity_used=capacity_used,
+                capacity_total=capacity_total,
             )
         )
 
@@ -560,6 +568,27 @@ def _slug_to_name(value: str) -> str:
     if not cleaned:
         return value
     return " ".join(word.capitalize() for word in cleaned.split())
+
+
+def _parse_capacity(item) -> tuple[Optional[int], Optional[int]]:
+    users_tag = item.select_one(".users")
+    if users_tag is None:
+        users_tag = item.find("span", attrs={"data-icon-alt": re.compile("uczest", re.I)})
+    if users_tag is None:
+        return None, None
+
+    text = users_tag.get_text(" ", strip=True)
+    match = CAPACITY_RE.search(text)
+    if not match:
+        return None, None
+
+    try:
+        used = int(match.group(1))
+        total = int(match.group(2))
+    except ValueError:
+        return None, None
+
+    return used, total
 
 
 async def _fetch_html_playwright(

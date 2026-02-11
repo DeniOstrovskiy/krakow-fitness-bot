@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
+import html
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -96,8 +97,11 @@ async def _handle_search(
             lines.append("")
             continue
 
-        for slot in slots[: cfg.max_results]:
-            lines.append(_format_slot(slot, tz))
+        shown_slots = slots[: cfg.max_results]
+        for idx, slot in enumerate(shown_slots):
+            lines.append(_format_slot(slot, tz, html_mode=True))
+            if idx < len(shown_slots) - 1:
+                lines.append("")
 
         if len(slots) > cfg.max_results:
             lines.append("")
@@ -114,17 +118,39 @@ async def _handle_search(
     while lines and not lines[-1].strip():
         lines.pop()
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
-def _format_slot(slot, tz) -> str:
+def _format_slot(slot, tz, html_mode: bool = False) -> str:
     date_str = slot.start.astimezone(tz).strftime("%a %d.%m %H:%M")
     status = f" [{slot.status}]" if slot.status else ""
     trainer = f" - {slot.trainer}" if slot.trainer else ""
-    line = f"- {date_str} - {slot.name}{trainer}{status}"
+    capacity_text = ""
+    if slot.capacity_total is not None and slot.capacity_used is not None:
+        free = max(slot.capacity_total - slot.capacity_used, 0)
+        capacity_text = f" | мест: {slot.capacity_total}, свободно: {free}"
+
+    line = f"- {date_str} - {slot.name}{trainer}{status}{capacity_text}"
     if getattr(slot, "url", None):
         line = f"{line} | {slot.url}"
-    return line
+
+    if not html_mode:
+        return line
+
+    date_html = html.escape(date_str)
+    name_html = html.escape(slot.name)
+    trainer_html = f" - {html.escape(slot.trainer)}" if slot.trainer else ""
+    status_html = f" [{html.escape(slot.status)}]" if slot.status else ""
+    capacity_html = ""
+    if slot.capacity_total is not None and slot.capacity_used is not None:
+        free = max(slot.capacity_total - slot.capacity_used, 0)
+        capacity_html = f" | мест: {slot.capacity_total}, свободно: {free}"
+    url_html = f" | {html.escape(slot.url)}" if getattr(slot, "url", None) else ""
+    return f"- <b>{date_html}</b> - <b>{name_html}</b>{trainer_html}{status_html}{capacity_html}{url_html}"
 
 
 def _build_webhook_url(base_url: str, path: str) -> str:
