@@ -10,7 +10,11 @@ from dotenv import load_dotenv
 
 _DEFAULT_CLUB_PREFIX = "MyFitnessPlace"
 _DEFAULT_TIMEZONE = "Europe/Warsaw"
-_DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; TgScheduleBot/1.0; +https://t.me/)"
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True)
