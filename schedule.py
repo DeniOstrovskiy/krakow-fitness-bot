@@ -313,10 +313,28 @@ def _fetch_html_requests(url: str, user_agent: str, timeout_s: int) -> str:
     headers = {
         "User-Agent": user_agent,
         "Accept-Language": "pl,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     response = requests.get(url, headers=headers, timeout=timeout_s)
     response.raise_for_status()
     return response.text
+
+
+def _fetch_html_diagnostics(url: str, user_agent: str, timeout_s: int) -> str:
+    headers = {
+        "User-Agent": user_agent,
+        "Accept-Language": "pl,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout_s)
+    except Exception as exc:  # noqa: BLE001
+        return f"request_error={type(exc).__name__}"
+
+    text = response.text or ""
+    sample = text.strip().replace("\n", " ")[:120]
+    ctype = response.headers.get("Content-Type", "")
+    return f"status={response.status_code}, len={len(text)}, ctype='{ctype}', sample='{sample}'"
 
 
 async def _click_first(page, selectors: Iterable[str]) -> bool:
@@ -834,7 +852,9 @@ async def fetch_schedule(
             return ScheduleResult(
                 slots=result.slots,
                 raw_count=result.raw_count,
-                debug_note=_summarize_html(html),
+                debug_note=_summarize_html(html)
+                + ", "
+                + _fetch_html_diagnostics(url, user_agent, timeout_s),
             )
         return result
 
@@ -860,7 +880,9 @@ async def fetch_schedule(
         return ScheduleResult(
             slots=result.slots,
             raw_count=result.raw_count,
-            debug_note=_summarize_html(html),
+            debug_note=_summarize_html(html)
+            + ", "
+            + _fetch_html_diagnostics(url, user_agent, timeout_s),
         )
     return result
 
