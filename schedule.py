@@ -329,25 +329,27 @@ _PROXY_TOKEN: str | None = os.environ.get("PROXY_TOKEN", "").strip() or None
 
 
 def _fetch_html_requests(url: str, user_agent: str, timeout_s: int) -> str:
-    """Fetch HTML, optionally through a Cloudflare Worker proxy.
+    """Fetch HTML using curl_cffi with Chrome TLS fingerprint.
 
-    When PROXY_URL is set, requests go through the proxy (EU edge)
-    to bypass datacenter IP blocking.  Otherwise fetches directly.
+    curl_cffi impersonates Chrome's exact TLS handshake (JA3/JA4),
+    which bypasses WAFs that block based on TLS fingerprinting.
+    Falls back to regular requests if curl_cffi is unavailable.
     """
-    if _PROXY_URL:
-        return _fetch_via_proxy(url, timeout_s)
+    try:
+        from curl_cffi import requests as cffi_requests
+        response = cffi_requests.get(
+            url,
+            impersonate="chrome",
+            timeout=timeout_s,
+            headers={**_BROWSER_HEADERS, "User-Agent": user_agent},
+        )
+        response.raise_for_status()
+        return response.text
+    except ImportError:
+        logging.warning("curl_cffi not installed, falling back to requests")
 
     headers = {**_BROWSER_HEADERS, "User-Agent": user_agent}
     response = requests.get(url, headers=headers, timeout=timeout_s)
-    response.raise_for_status()
-    return response.text
-
-
-def _fetch_via_proxy(url: str, timeout_s: int) -> str:
-    params = {"url": url}
-    if _PROXY_TOKEN:
-        params["token"] = _PROXY_TOKEN
-    response = requests.get(_PROXY_URL, params=params, timeout=timeout_s)
     response.raise_for_status()
     return response.text
 
