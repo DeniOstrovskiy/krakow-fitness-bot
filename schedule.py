@@ -322,10 +322,28 @@ _BROWSER_HEADERS = {
 }
 
 
+_MIN_SCHEDULE_HTML_LEN = 10_000
+
+
 def _fetch_html_requests(url: str, user_agent: str, timeout_s: int) -> str:
-    headers = {**_BROWSER_HEADERS, "User-Agent": user_agent}
-    response = requests.get(url, headers=headers, timeout=timeout_s)
+    """Fetch HTML with session-based retry.
+
+    Some sites return a short challenge page (HTTP 202 + cookie) on the
+    first request from datacenter IPs.  A retry with the session cookie
+    often returns the full page.
+    """
+    session = requests.Session()
+    session.headers.update({**_BROWSER_HEADERS, "User-Agent": user_agent})
+
+    response = session.get(url, timeout=timeout_s)
     response.raise_for_status()
+
+    if len(response.text) < _MIN_SCHEDULE_HTML_LEN:
+        import time
+        time.sleep(2)
+        response = session.get(url, timeout=timeout_s)
+        response.raise_for_status()
+
     return response.text
 
 
