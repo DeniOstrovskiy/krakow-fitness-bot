@@ -375,7 +375,9 @@ async def _click_first(page, selectors: Iterable[str]) -> bool:
         try:
             if await locator.count() == 0:
                 continue
-            await locator.first.click()
+            if not await locator.first.is_visible():
+                continue
+            await locator.first.click(timeout=3000)
             return True
         except Exception:  # noqa: BLE001
             continue
@@ -425,9 +427,6 @@ async def _try_click_today(page) -> None:
         "button:has-text(\"Dzisiaj\")",
         "button:has-text(\"Today\")",
         "button:has-text(\"Teraz\")",
-        "a:has-text(\"Dziś\")",
-        "a:has-text(\"Dzis\")",
-        "a:has-text(\"Dzisiaj\")",
         "[aria-label*=\"today\" i]",
         "[aria-label*=\"dzis\" i]",
     ]
