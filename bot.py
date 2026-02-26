@@ -473,6 +473,8 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             lines.append(
                 f"- Date range: {earliest.strftime('%d.%m.%Y')} - {latest.strftime('%d.%m.%Y')}"
             )
+        elif getattr(schedule, "debug_note", None):
+            lines.append(f"- Debug: {schedule.debug_note}")
 
         if week_slots:
             lines.append("- Examples (this week):")

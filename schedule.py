@@ -85,6 +85,7 @@ class Slot:
 class ScheduleResult:
     slots: list[Slot]
     raw_count: int
+    debug_note: Optional[str] = None
 
 
 def _strip_accents(text: str) -> str:
@@ -500,6 +501,21 @@ def _parse_slots_from_html(
     return ScheduleResult(slots=slots, raw_count=len(candidates))
 
 
+def _summarize_html(html: str) -> str:
+    """Short diagnostic summary for debug output."""
+    text = html or ""
+    length = len(text)
+    title = ""
+    try:
+        soup = BeautifulSoup(text, "lxml")
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+    except Exception:  # noqa: BLE001
+        title = ""
+    has_items = "club-schedule-item" in text
+    return f"len={length}, title='{title}', has_items={has_items}"
+
+
 def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list[Slot], int]:
     items = soup.select("li.club-schedule-item")
     if not items:
@@ -813,7 +829,14 @@ async def fetch_schedule(
     today = (now.date() if now else datetime.now().date())
     if not use_playwright:
         html = await asyncio.to_thread(_fetch_html_requests, url, user_agent, timeout_s)
-        return _parse_slots_from_html(html, selector, today, url)
+        result = _parse_slots_from_html(html, selector, today, url)
+        if not result.slots:
+            return ScheduleResult(
+                slots=result.slots,
+                raw_count=result.raw_count,
+                debug_note=_summarize_html(html),
+            )
+        return result
 
     # Try fast HTML fetch first; fall back to Playwright only if empty.
     html = await asyncio.to_thread(_fetch_html_requests, url, user_agent, timeout_s)
@@ -832,7 +855,14 @@ async def fetch_schedule(
         seek_week=playwright_seek_week,
         max_steps=playwright_max_steps,
     )
-    return _parse_slots_from_html(html, selector, today, url)
+    result = _parse_slots_from_html(html, selector, today, url)
+    if not result.slots:
+        return ScheduleResult(
+            slots=result.slots,
+            raw_count=result.raw_count,
+            debug_note=_summarize_html(html),
+        )
+    return result
 
 
 def week_range(now: datetime) -> tuple[datetime, datetime]:
