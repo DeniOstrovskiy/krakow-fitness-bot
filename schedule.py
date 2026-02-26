@@ -809,7 +809,19 @@ async def _fetch_html_playwright(
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             headless=headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--disable-software-rasterizer",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--no-first-run",
+                "--single-process",
+                "--js-flags=--max-old-space-size=128",
+            ],
         )
         try:
             context = await browser.new_context(
@@ -818,11 +830,11 @@ async def _fetch_html_playwright(
             )
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            logging.info("Page loaded: %s (title: %s)", url, await page.title())
             await _maybe_accept_cookies(page)
-            await _try_set_week_view(page)
-            await _try_click_today(page)
-            # Avoid long waits: a short pause is usually enough for the schedule widget.
-            await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(2000)
+            content_len = len(await page.content())
+            logging.info("Page content length after cookies: %d", content_len)
 
             if wait_selector:
                 try:
@@ -830,8 +842,12 @@ async def _fetch_html_playwright(
                 except Exception:  # noqa: BLE001
                     logging.debug("Wait selector not found: %s", wait_selector)
             else:
-                fast_timeout = min(5000, max(1500, timeout_ms // 3))
-                await _wait_for_any_selector(page, DEFAULT_WAIT_SELECTORS, fast_timeout)
+                fast_timeout = min(8000, max(3000, timeout_ms // 2))
+                found = await _wait_for_any_selector(page, DEFAULT_WAIT_SELECTORS, fast_timeout)
+                logging.info("Schedule selector found: %s", found)
+                if not found:
+                    await page.wait_for_timeout(3000)
+                    logging.info("Final content length: %d", len(await page.content()))
 
             if seek_week:
                 now_dt = datetime.combine(today, time.min)
