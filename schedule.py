@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 import asyncio
 import logging
+import os
 import re
 import unicodedata
 from typing import Iterable, Optional
@@ -323,27 +324,31 @@ _BROWSER_HEADERS = {
 
 
 _MIN_SCHEDULE_HTML_LEN = 10_000
+_PROXY_URL: str | None = os.environ.get("PROXY_URL", "").strip() or None
+_PROXY_TOKEN: str | None = os.environ.get("PROXY_TOKEN", "").strip() or None
 
 
 def _fetch_html_requests(url: str, user_agent: str, timeout_s: int) -> str:
-    """Fetch HTML with session-based retry.
+    """Fetch HTML, optionally through a Cloudflare Worker proxy.
 
-    Some sites return a short challenge page (HTTP 202 + cookie) on the
-    first request from datacenter IPs.  A retry with the session cookie
-    often returns the full page.
+    When PROXY_URL is set, requests go through the proxy (EU edge)
+    to bypass datacenter IP blocking.  Otherwise fetches directly.
     """
-    session = requests.Session()
-    session.headers.update({**_BROWSER_HEADERS, "User-Agent": user_agent})
+    if _PROXY_URL:
+        return _fetch_via_proxy(url, timeout_s)
 
-    response = session.get(url, timeout=timeout_s)
+    headers = {**_BROWSER_HEADERS, "User-Agent": user_agent}
+    response = requests.get(url, headers=headers, timeout=timeout_s)
     response.raise_for_status()
+    return response.text
 
-    if len(response.text) < _MIN_SCHEDULE_HTML_LEN:
-        import time
-        time.sleep(2)
-        response = session.get(url, timeout=timeout_s)
-        response.raise_for_status()
 
+def _fetch_via_proxy(url: str, timeout_s: int) -> str:
+    params = {"url": url}
+    if _PROXY_TOKEN:
+        params["token"] = _PROXY_TOKEN
+    response = requests.get(_PROXY_URL, params=params, timeout=timeout_s)
+    response.raise_for_status()
     return response.text
 
 
@@ -801,7 +806,10 @@ async def _fetch_html_playwright(
 
     timeout_ms = timeout_s * 1000
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless)
+        browser = await playwright.chromium.launch(
+            headless=headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
         try:
             context = await browser.new_context(
                 user_agent=user_agent,
