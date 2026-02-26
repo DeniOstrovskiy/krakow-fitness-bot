@@ -23,6 +23,7 @@ ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 ISO_DATETIME_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})")
 UNIX_TS_RE = re.compile(r"\b(\d{10}|\d{13})\b")
 CAPACITY_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+DURATION_RE = re.compile(r"(\d+)\s*min", re.IGNORECASE)
 
 # ---------------------------------------------------------------------------
 # Parsing limits
@@ -75,6 +76,7 @@ class Slot:
     url: Optional[str]
     capacity_used: Optional[int]
     capacity_total: Optional[int]
+    duration_min: Optional[int] = None
     waitlist_used: Optional[int] = None
     waitlist_total: Optional[int] = None
 
@@ -491,6 +493,7 @@ def _parse_slots_from_html(
                 url=None,
                 capacity_used=None,
                 capacity_total=None,
+                duration_min=_parse_duration_minutes(text),
             )
         )
 
@@ -562,6 +565,7 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
         item_url = item.get("data-url")
         absolute_url = urljoin(base_url, item_url) if item_url else None
         capacity_used, capacity_total = _parse_capacity(item)
+        duration_min = _parse_duration_minutes(item)
 
         # If class is full but still bookable, it's actually a waitlist
         if (
@@ -582,6 +586,7 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
                 url=absolute_url,
                 capacity_used=capacity_used,
                 capacity_total=capacity_total,
+                duration_min=duration_min,
             )
         )
 
@@ -653,6 +658,7 @@ async def enrich_waitlist_slots(
                     url=slot.url,
                     capacity_used=real_used,
                     capacity_total=real_total,
+                    duration_min=slot.duration_min,
                     waitlist_used=waitlist_used,
                     waitlist_total=None,
                 )
@@ -686,6 +692,31 @@ def _parse_capacity(item) -> tuple[Optional[int], Optional[int]]:
         return None, None
 
     return used, total
+
+
+def _parse_duration_minutes(source) -> Optional[int]:
+    """Extract duration in minutes from a tag or plain text."""
+    text = ""
+    if hasattr(source, "get_text"):
+        duration_tag = source.select_one(".time")
+        if duration_tag is None:
+            duration_tag = source.find(
+                "span", attrs={"data-icon-alt": re.compile("czas", re.I)}
+            )
+        if duration_tag is not None:
+            text = duration_tag.get_text(" ", strip=True)
+        else:
+            text = source.get_text(" ", strip=True)
+    else:
+        text = str(source or "")
+
+    match = DURATION_RE.search(text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
 
 
 async def _fetch_html_playwright(
