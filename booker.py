@@ -37,6 +37,10 @@ class AuthError(Exception):
     pass
 
 
+class BlockedError(Exception):
+    pass
+
+
 def now_local() -> dt.datetime:
     return dt.datetime.now(TZ).replace(tzinfo=None)
 
@@ -71,6 +75,8 @@ def fetch_club(s: requests.Session, club: str, require_auth: bool = True) -> lis
     if r.status_code == 404:
         raise ValueError(f"клуб '{club}' не найден")
     r.raise_for_status()
+    if r.status_code != 200 or len(r.text) < 2000:
+        raise BlockedError(f"сайт вернул HTTP {r.status_code}, {len(r.text)} байт (возможна защита от ботов)")
     if require_auth and _logged_out(r.text):
         raise AuthError("session expired")
     soup = BeautifulSoup(r.text, "html.parser")
