@@ -13,6 +13,8 @@ import time
 from zoneinfo import ZoneInfo
 
 import requests
+
+import waf
 from bs4 import BeautifulSoup
 
 import store
@@ -57,7 +59,7 @@ def parse_cookie_string(raw: str) -> dict:
 
 
 def make_session(cookies: dict) -> requests.Session:
-    s = requests.Session()
+    s = waf.new_session()
     s.headers.update({"User-Agent": UA, "Accept-Language": "pl,en;q=0.8"})
     for k, v in cookies.items():
         s.cookies.set(k, v, domain="zdrofit.pl")

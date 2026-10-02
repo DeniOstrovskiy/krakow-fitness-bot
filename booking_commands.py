@@ -13,6 +13,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 import booker
 import store
+import waf
 
 DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 DAY_MAP = {**{n: i for i, n in enumerate(DAY_NAMES)},
@@ -318,7 +319,8 @@ async def probe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url, _FULL_HEADERS)
     home = await asyncio.to_thread(_probe_one, booker.make_session({}), "https://zdrofit.pl/", _FULL_HEADERS)
     await update.effective_message.reply_text(
-        f"{club}\n\n1) Обычный запрос:\n{plain}\n\n2) Как браузер:\n{full}\n\n3) Главная страница:\n{home}")
+        f"{club}\n\n1) Обычный запрос:\n{plain}\n\n2) Как браузер:\n{full}\n\n3) Главная страница:\n{home}\n\n"
+        f"Браузер (WAF): {waf.info}")
 
 
 async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

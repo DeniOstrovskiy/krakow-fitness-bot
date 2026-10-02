@@ -295,7 +295,9 @@ def _fetch_html_requests(url: str, user_agent: str, timeout_s: int) -> str:
         "User-Agent": user_agent,
         "Accept-Language": "pl,en;q=0.8",
     }
-    response = requests.get(url, headers=headers, timeout=timeout_s)
+    import waf  # обход JS-проверки AWS WAF (на Render сайт отдаёт её вместо страницы)
+
+    response = waf.new_session().get(url, headers={"Accept-Language": "pl,en;q=0.8"}, timeout=timeout_s)
     response.raise_for_status()
     return response.text
 
