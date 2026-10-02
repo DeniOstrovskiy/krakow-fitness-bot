@@ -236,6 +236,9 @@ async def cookie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(msg.chat_id, "Пришлите так: /cookie name=value; name2=value2 ...")
         return
     ok = await asyncio.to_thread(_check_session, cookies)
+    if ok is None:
+        await context.bot.send_message(msg.chat_id, "⚠️ Сайт не отдаёт страницы с сервера (защита от ботов). Запустите /probe.")
+        return
     if ok:
         def save(st):
             st["cookies"], st["auth_alert"] = cookies, ""
@@ -251,6 +254,8 @@ def _check_session(cookies: dict) -> bool:
         return True
     except booker.AuthError:
         return False
+    except booker.BlockedError:
+        return None  # сайт не отдаёт страницу серверу (защита от ботов)
 
 
 @owner_only
@@ -258,7 +263,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await asyncio.to_thread(store.load)
     sess = "нет cookie"
     if st["cookies"]:
-        sess = "OK" if await asyncio.to_thread(_check_session, st["cookies"]) else "истекла"
+        chk = await asyncio.to_thread(_check_session, st["cookies"])
+        sess = "сайт блокирует запросы с сервера" if chk is None else ("OK" if chk else "истекла")
     last = f"{int(time.time() - st['last_tick'])} с назад" if st["last_tick"] else "ещё не было"
     text = (f"Сессия: {sess}\nОтслеживаний: {len(st['watches'])}\n"
             f"Пауза: {'да' if st['paused'] else 'нет'}\nПоследняя проверка: {last}")
@@ -274,29 +280,45 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(text)
 
 
-def _probe_one(session, url):
+def _probe_one(session, url, extra=None):
     try:
-        r = session.get(url, timeout=25)
+        r = session.get(url, timeout=25, headers=extra or {})
         body = r.text
+        h = r.headers
+        hd = {k: h[k] for k in h if k.lower() in (
+            "server", "x-amzn-waf-action", "cf-mitigated", "x-cache", "via", "content-type",
+            "x-amz-cf-pop", "retry-after")}
+        cookie_names = ",".join(sorted({c.name for c in r.cookies}))[:80]
         title = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
         title = " ".join(title.group(1).split())[:80] if title else "-"
-        snippet = " ".join(re.sub(r"<[^>]+>", " ", body).split())[:160]
-        return (f"HTTP {r.status_code}, {len(body)} байт, элементов: {body.count('club-schedule-item')}, "
-                f"форма входа: {'да' if 'member_login_form' in body else 'нет'}\n"
-                f"title: {title}\nтекст: {snippet}")
+        return (f"HTTP {r.status_code}, {len(body)} байт, элементов: {body.count('club-schedule-item')}\n"
+                f"заголовки: {hd}\ncookie от сайта: {cookie_names or '-'}\ntitle: {title}")
     except Exception as exc:  # noqa: BLE001
         return f"ошибка: {type(exc).__name__}: {str(exc)[:150]}"
 
 
+_FULL_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1",
+    "Sec-Ch-Ua": '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": '"macOS"',
+}
+
+
 @owner_only
 async def probe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/probe — что сайт отдаёт серверу: без сессии и с сессией."""
+    """/probe — что сайт отдаёт серверу: обычный запрос и «как браузер»."""
     club = FAVORITES[0]
     url = f"https://zdrofit.pl/kluby-fitness/{club}/grafik-zajec"
     st = await asyncio.to_thread(store.load)
-    guest = await asyncio.to_thread(_probe_one, booker.make_session({}), url)
-    auth = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url)
-    await update.effective_message.reply_text(f"{club}\n\nБез сессии:\n{guest}\n\nС сессией:\n{auth}")
+    plain = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url)
+    full = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url, _FULL_HEADERS)
+    home = await asyncio.to_thread(_probe_one, booker.make_session({}), "https://zdrofit.pl/", _FULL_HEADERS)
+    await update.effective_message.reply_text(
+        f"{club}\n\n1) Обычный запрос:\n{plain}\n\n2) Как браузер:\n{full}\n\n3) Главная страница:\n{home}")
 
 
 async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
