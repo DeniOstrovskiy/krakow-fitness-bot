@@ -8,14 +8,6 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-_DEFAULT_CLUB_PREFIX = "MyFitnessPlace"
-_DEFAULT_TIMEZONE = "Europe/Warsaw"
-_DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/122.0.0.0 Safari/537.36"
-)
-
 
 @dataclass(frozen=True)
 class ClubSchedule:
@@ -51,12 +43,15 @@ def load_config() -> Config:
     bot_token = os.getenv("BOT_TOKEN", "").strip()
     schedule_url = os.getenv("SCHEDULE_URL", "").strip()
     schedule_urls = os.getenv("SCHEDULE_URLS", "").strip()
-    timezone_name = os.getenv("TIMEZONE", _DEFAULT_TIMEZONE).strip()
+    timezone_name = os.getenv("TIMEZONE", "Europe/Warsaw").strip()
     club_name_raw = os.getenv("CLUB_NAME")
-    club_name = (club_name_raw or _DEFAULT_CLUB_PREFIX).strip()
+    club_name = (club_name_raw or "MyFitnessPlace").strip()
     club_names = os.getenv("CLUB_NAMES", "").strip()
     max_results = int(os.getenv("MAX_RESULTS", "20"))
-    user_agent = os.getenv("USER_AGENT", _DEFAULT_USER_AGENT).strip()
+    user_agent = os.getenv(
+        "USER_AGENT",
+        "Mozilla/5.0 (compatible; TgScheduleBot/1.0; +https://t.me/)",
+    ).strip()
     log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
     event_selector = os.getenv("EVENT_SELECTOR", "").strip() or None
     event_selectors = os.getenv("EVENT_SELECTORS", "").strip()
@@ -152,16 +147,18 @@ def _align_or_generate_names(names: list[str], urls: list[str]) -> list[str]:
 
 
 def _derive_name_from_url(url: str) -> str:
-    """Extract a human-readable club name from a schedule URL path."""
     parsed = urlparse(url)
     parts = [part for part in parsed.path.split("/") if part]
     if "grafik-zajec" in parts:
         idx = parts.index("grafik-zajec")
-        slug = parts[idx - 1] if idx > 0 else parts[-1]
+        if idx > 0:
+            slug = parts[idx - 1]
+        else:
+            slug = parts[-1]
     else:
         slug = parts[-1] if parts else "Schedule"
     name = slug.replace("-", " ").title()
-    return f"{_DEFAULT_CLUB_PREFIX} {name}"
+    return f"MyFitnessPlace {name}"
 
 
 def _parse_bool(value: str | None) -> bool:

@@ -76,3 +76,51 @@ If no slots are found but the page is public:
 If the page loads the schedule via JavaScript, keep `USE_PLAYWRIGHT=1`.
 
 You can also try a different Krakow club schedule URL if the first one is not correct.
+
+---
+
+# Автозапись на занятия (бесплатный деплой)
+
+Вход на zdrofit.pl защищён reCAPTCHA, поэтому бот не вводит пароль: вы входите сами в браузере и присылаете боту cookie командой `/cookie` (раз в несколько недель, когда сессия истечёт).
+
+## Команды бота
+- `/watch клуб | занятие | дни | время | тренер` — например `/watch kazimierz | bodypump | пн,ср | 18:00-20:00 | Buczek`
+- `/list`, `/remove N`, `/pause`, `/resume`, `/status`
+- `/cookie <строка Cookie из браузера>` — сообщение сразу удаляется
+- `/myid` — ваш Telegram id
+
+Отмену записи бот не делает: отменяйте на сайте.
+
+## Запуск на Render (бесплатно)
+1. **Upstash**: создайте бесплатную Redis-базу и скопируйте REST URL и REST Token.
+2. **Render** → Web Service из этого репозитория:
+   - Build: `pip install -r requirements.txt`
+   - Start: `python3 run.py`
+   - Переменные: `BOT_TOKEN`, `TIMEZONE=Europe/Warsaw`, `USE_PLAYWRIGHT=0`, `SCHEDULE_URLS`, `CLUB_NAMES` (как раньше), плюс новые: `ALLOWED_USER_ID`, `TICK_SECRET`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`.
+   - Сначала запустите без `ALLOWED_USER_ID`, напишите боту `/myid`, вставьте число в переменную и перезапустите.
+3. **cron-job.org**: создайте задание GET `https://<ваш-сервис>.onrender.com/tick?key=<TICK_SECRET>` с интервалом 1 минута (если бесплатный тариф не даёт, то 2–5 минут). Оно не даёт сервису заснуть и запускает проверку расписания.
+4. В Telegram: `/cookie ...`, затем `/watch ...` для каждого занятия, затем `/status`.
+
+## Как достать cookie
+Войдите на zdrofit.pl в Chrome → F12 → Network → обновите страницу → первый запрос → Request Headers → значение `Cookie` целиком.
+
+## Локальный запуск
+`python run.py` без `WEBHOOK_URL`: бот работает через polling и проверяет расписание раз в минуту. Состояние лежит в `data.json`.
+
+## Первый боевой запуск
+Добавьте одно занятие, которое сейчас открыто для записи, и проверьте результат на сайте. `/status` покажет ответ сайта на последнюю попытку записи. Если успех определяется неверно, пришлите этот текст.
+
+## Кнопки «Записаться» в поиске
+Отправьте боту название занятия (например `bodypump`) или `trainer: Имя Фамилия`. Бот пришлёт каждое занятие из ближайших 7 дней отдельным сообщением с кнопкой «✅ Записаться» (до `MAX_CARDS`, по умолчанию 12; кнопки видит только владелец из `ALLOWED_USER_ID`, остальные получают обычный список). Нажатие работает так:
+- запись открыта и есть места: бот записывает сразу;
+- запись ещё не открыта или мест нет: занятие ставится на автозапись, бот запишет, как только станет возможно (`/list` покажет очередь, `/remove N` уберёт).
+
+---
+
+# Деплой на Render (Docker, бесплатно)
+
+1. **Upstash**: бесплатная Redis-база, скопируйте REST URL и REST Token.
+2. **GitHub**: `git add -A && git commit -m "..." && git push`.
+3. **Render**: New → Blueprint → этот репозиторий (читается `render.yaml`) или New → Web Service → Docker. Переменные: `BOT_TOKEN`, `ALLOWED_USER_ID`, `SCHEDULE_URLS`, `CLUB_NAMES`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `TICK_SECRET` (любая длинная случайная строка), `TIMEZONE=Europe/Warsaw`, `USE_PLAYWRIGHT=0`. Health Check Path: `/health`.
+4. **cron-job.org**: GET `https://<ваш-сервис>.onrender.com/tick?key=<TICK_SECRET>` каждую минуту (не даёт сервису заснуть и запускает проверку расписания).
+5. Остановите локального бота и в Telegram заново отправьте `/cookie`, затем `/status`.

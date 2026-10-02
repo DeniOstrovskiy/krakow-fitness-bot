@@ -1,0 +1,28 @@
+# Render Blueprint: New -> Blueprint -> выберите этот репозиторий.
+# Значения с sync:false Render спросит при создании; TICK_SECRET сгенерируется сам.
+services:
+  - type: web
+    name: zdrofit-booking-bot
+    runtime: docker
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_ID
+        sync: false
+      - key: SCHEDULE_URLS
+        sync: false
+      - key: CLUB_NAMES
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: TICK_SECRET
+        generateValue: true
+      - key: TIMEZONE
+        value: Europe/Warsaw
+      - key: USE_PLAYWRIGHT
+        value: "0"

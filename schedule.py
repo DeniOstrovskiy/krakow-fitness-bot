@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 import asyncio
 import logging
-import os
 import re
 import unicodedata
 from typing import Iterable, Optional
@@ -14,9 +13,6 @@ import requests
 from bs4 import BeautifulSoup
 
 
-# ---------------------------------------------------------------------------
-# Compiled regex patterns
-# ---------------------------------------------------------------------------
 TIME_RE = re.compile(r"\b([01]\d|2[0-3])[:.][0-5]\d\b")
 DATE_RE_NUM = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{4}))?\b")
 DATE_RE_WORD = re.compile(r"\b(\d{1,2})\s+([A-Za-z\u00C0-\u017F]+)\b")
@@ -24,14 +20,6 @@ ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 ISO_DATETIME_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})")
 UNIX_TS_RE = re.compile(r"\b(\d{10}|\d{13})\b")
 CAPACITY_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
-DURATION_RE = re.compile(r"(\d+)\s*min", re.IGNORECASE)
-
-# ---------------------------------------------------------------------------
-# Parsing limits
-# ---------------------------------------------------------------------------
-_MAX_EVENT_TEXT_LEN = 220
-_DATE_CONTEXT_MAX_DEPTH = 50
-_YEAR_BOUNDARY_MONTHS = 6
 
 MONTHS_ASCII = {
     "stycznia": 1,
@@ -48,22 +36,20 @@ MONTHS_ASCII = {
     "grudnia": 12,
 }
 
-# Order matters: more specific phrases MUST come before shorter ones
-# (e.g. "lista rezerwowa" before "zapisz sie", "zamkniete zapisy" before "zapisy").
 STATUS_KEYWORDS = {
-    "lista rezerwowa": "waitlist",
-    "brak miejsc": "full",
-    "odwolane zajecia": "cancelled",
-    "odwolane": "cancelled",
-    "odwolana": "cancelled",
-    "odwolany": "cancelled",
-    "zamkniete zapisy": "closed",
-    "termin rejestracji minal": "closed",
-    "za wczesnie": "closed",
     "zarezerwuj": "open",
     "rezerwuj": "open",
     "zapisz sie": "open",
+    "brak miejsc": "full",
+    "lista rezerwowa": "waitlist",
+    "odwolane": "cancelled",
+    "odwolana": "cancelled",
+    "odwolany": "cancelled",
+    "odwolane zajecia": "cancelled",
     "zapisy": "open",
+    "zamkniete zapisy": "closed",
+    "za wczesnie": "early",
+    "termin rejestracji minal": "closed",
 }
 
 
@@ -77,16 +63,12 @@ class Slot:
     url: Optional[str]
     capacity_used: Optional[int]
     capacity_total: Optional[int]
-    duration_min: Optional[int] = None
-    waitlist_used: Optional[int] = None
-    waitlist_total: Optional[int] = None
 
 
 @dataclass(frozen=True)
 class ScheduleResult:
     slots: list[Slot]
     raw_count: int
-    debug_note: Optional[str] = None
 
 
 def _strip_accents(text: str) -> str:
@@ -210,25 +192,23 @@ def _parse_datetime_from_attrs(tag) -> Optional[datetime]:
 
 def _adjust_year(today: date, month: int, year: int) -> int:
     # If the schedule crosses a year boundary (e.g., Dec -> Jan), adjust forward.
-    if year == today.year and month < today.month and (today.month - month) > _YEAR_BOUNDARY_MONTHS:
+    if year == today.year and month < today.month and (today.month - month) > 6:
         return year + 1
     return year
 
 
 def _find_date_context(tag, today: date) -> Optional[date]:
-    """Walk up the DOM (current tag -> previous siblings -> parent) looking for a date.
-
-    Stops after ``_DATE_CONTEXT_MAX_DEPTH`` nodes to avoid runaway traversal.
-    """
+    # Look at current tag, then previous siblings, then parents' previous siblings.
     checked = 0
     node = tag
-    while node is not None and checked < _DATE_CONTEXT_MAX_DEPTH:
+    while node is not None and checked < 50:
         text = node.get_text(" ", strip=True)
         found = _parse_date(text, today)
         if found:
             return found
+        # Previous siblings
         prev = node.previous_sibling
-        while prev is not None and checked < _DATE_CONTEXT_MAX_DEPTH:
+        while prev is not None and checked < 50:
             checked += 1
             if hasattr(prev, "get_text"):
                 text = prev.get_text(" ", strip=True)
@@ -293,7 +273,7 @@ def _event_candidates(soup: BeautifulSoup, selector: Optional[str]) -> list:
         text = tag.get_text(" ", strip=True)
         if not TIME_RE.search(text):
             continue
-        if len(text) > _MAX_EVENT_TEXT_LEN:
+        if len(text) > 220:
             continue
         # Skip tags that contain smaller tags with their own time
         has_time_child = False
@@ -310,65 +290,14 @@ def _event_candidates(soup: BeautifulSoup, selector: Optional[str]) -> list:
     return candidates
 
 
-_BROWSER_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-}
-
-
-_MIN_SCHEDULE_HTML_LEN = 10_000
-_PROXY_URL: str | None = os.environ.get("PROXY_URL", "").strip() or None
-_PROXY_TOKEN: str | None = os.environ.get("PROXY_TOKEN", "").strip() or None
-
-
 def _fetch_html_requests(url: str, user_agent: str, timeout_s: int) -> str:
-    """Fetch HTML using curl_cffi with Chrome TLS fingerprint.
-
-    curl_cffi impersonates Chrome's exact TLS handshake (JA3/JA4),
-    which bypasses WAFs that block based on TLS fingerprinting.
-    Falls back to regular requests if curl_cffi is unavailable.
-    """
-    try:
-        from curl_cffi import requests as cffi_requests
-        response = cffi_requests.get(
-            url,
-            impersonate="chrome",
-            timeout=timeout_s,
-            headers={**_BROWSER_HEADERS, "User-Agent": user_agent},
-        )
-        response.raise_for_status()
-        return response.text
-    except ImportError:
-        logging.warning("curl_cffi not installed, falling back to requests")
-
-    headers = {**_BROWSER_HEADERS, "User-Agent": user_agent}
-    response = requests.get(url, headers=headers, timeout=timeout_s)
-    response.raise_for_status()
-    return response.text
-
-
-def _fetch_html_diagnostics(url: str, user_agent: str, timeout_s: int) -> str:
     headers = {
         "User-Agent": user_agent,
         "Accept-Language": "pl,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    try:
-        response = requests.get(url, headers=headers, timeout=timeout_s)
-    except Exception as exc:  # noqa: BLE001
-        return f"request_error={type(exc).__name__}"
-
-    text = response.text or ""
-    sample = text.strip().replace("\n", " ")[:120]
-    ctype = response.headers.get("Content-Type", "")
-    return f"status={response.status_code}, len={len(text)}, ctype='{ctype}', sample='{sample}'"
+    response = requests.get(url, headers=headers, timeout=timeout_s)
+    response.raise_for_status()
+    return response.text
 
 
 async def _click_first(page, selectors: Iterable[str]) -> bool:
@@ -377,9 +306,7 @@ async def _click_first(page, selectors: Iterable[str]) -> bool:
         try:
             if await locator.count() == 0:
                 continue
-            if not await locator.first.is_visible():
-                continue
-            await locator.first.click(timeout=3000)
+            await locator.first.click()
             return True
         except Exception:  # noqa: BLE001
             continue
@@ -429,6 +356,9 @@ async def _try_click_today(page) -> None:
         "button:has-text(\"Dzisiaj\")",
         "button:has-text(\"Today\")",
         "button:has-text(\"Teraz\")",
+        "a:has-text(\"Dziś\")",
+        "a:has-text(\"Dzis\")",
+        "a:has-text(\"Dzisiaj\")",
         "[aria-label*=\"today\" i]",
         "[aria-label*=\"dzis\" i]",
     ]
@@ -545,26 +475,10 @@ def _parse_slots_from_html(
                 url=None,
                 capacity_used=None,
                 capacity_total=None,
-                duration_min=_parse_duration_minutes(text),
             )
         )
 
     return ScheduleResult(slots=slots, raw_count=len(candidates))
-
-
-def _summarize_html(html: str) -> str:
-    """Short diagnostic summary for debug output."""
-    text = html or ""
-    length = len(text)
-    title = ""
-    try:
-        soup = BeautifulSoup(text, "lxml")
-        if soup.title and soup.title.string:
-            title = soup.title.string.strip()
-    except Exception:  # noqa: BLE001
-        title = ""
-    has_items = "club-schedule-item" in text
-    return f"len={length}, title='{title}', has_items={has_items}"
 
 
 def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list[Slot], int]:
@@ -632,16 +546,6 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
         item_url = item.get("data-url")
         absolute_url = urljoin(base_url, item_url) if item_url else None
         capacity_used, capacity_total = _parse_capacity(item)
-        duration_min = _parse_duration_minutes(item)
-
-        # If class is full but still bookable, it's actually a waitlist
-        if (
-            status == "open"
-            and capacity_used is not None
-            and capacity_total is not None
-            and capacity_used >= capacity_total
-        ):
-            status = "waitlist"
 
         slots.append(
             Slot(
@@ -653,84 +557,10 @@ def _parse_club_schedule_items(soup: BeautifulSoup, base_url: str) -> tuple[list
                 url=absolute_url,
                 capacity_used=capacity_used,
                 capacity_total=capacity_total,
-                duration_min=duration_min,
             )
         )
 
     return slots, len(items)
-
-
-def _fetch_waitlist_details(
-    url: str,
-    user_agent: str,
-    timeout_s: int = 10,
-) -> tuple[Optional[int], Optional[int]]:
-    """Fetch the detail page for a class and extract real capacity (including waitlist).
-
-    Returns (real_used, total) where real_used can exceed total when people are
-    on the waitlist.  For example (38, 35) means 3 people on waitlist.
-    Returns (None, None) on any failure.
-    """
-    try:
-        html_text = _fetch_html_requests(url, user_agent, timeout_s)
-    except Exception:  # noqa: BLE001
-        return None, None
-
-    soup = BeautifulSoup(html_text, "lxml")
-
-    # The detail page has a #rezerwacja section with capacity like "38/35"
-    rez = soup.select_one("#rezerwacja")
-    if rez is None:
-        rez = soup
-
-    users_tag = rez.select_one(".users")
-    if users_tag is None:
-        users_tag = rez.find("span", attrs={"data-icon-alt": re.compile("uczest", re.I)})
-    if users_tag is None:
-        return None, None
-
-    text = users_tag.get_text(" ", strip=True)
-    match = CAPACITY_RE.search(text)
-    if not match:
-        return None, None
-
-    try:
-        return int(match.group(1)), int(match.group(2))
-    except ValueError:
-        return None, None
-
-
-async def enrich_waitlist_slots(
-    slots: list[Slot],
-    user_agent: str,
-    timeout_s: int = 10,
-) -> list[Slot]:
-    """For slots with waitlist status and a URL, fetch the detail page
-    to get the real capacity numbers (including waitlist overflow)."""
-    enriched: list[Slot] = []
-    for slot in slots:
-        if slot.status == "waitlist" and slot.url:
-            real_used, real_total = await asyncio.to_thread(
-                _fetch_waitlist_details, slot.url, user_agent, timeout_s
-            )
-            if real_used is not None and real_total is not None and real_used > real_total:
-                waitlist_used = real_used - real_total
-                # We don't know the max waitlist size, so leave waitlist_total as None
-                slot = Slot(
-                    name=slot.name,
-                    start=slot.start,
-                    status=slot.status,
-                    trainer=slot.trainer,
-                    raw=slot.raw,
-                    url=slot.url,
-                    capacity_used=real_used,
-                    capacity_total=real_total,
-                    duration_min=slot.duration_min,
-                    waitlist_used=waitlist_used,
-                    waitlist_total=None,
-                )
-        enriched.append(slot)
-    return enriched
 
 
 def _slug_to_name(value: str) -> str:
@@ -761,31 +591,6 @@ def _parse_capacity(item) -> tuple[Optional[int], Optional[int]]:
     return used, total
 
 
-def _parse_duration_minutes(source) -> Optional[int]:
-    """Extract duration in minutes from a tag or plain text."""
-    text = ""
-    if hasattr(source, "get_text"):
-        duration_tag = source.select_one(".time")
-        if duration_tag is None:
-            duration_tag = source.find(
-                "span", attrs={"data-icon-alt": re.compile("czas", re.I)}
-            )
-        if duration_tag is not None:
-            text = duration_tag.get_text(" ", strip=True)
-        else:
-            text = source.get_text(" ", strip=True)
-    else:
-        text = str(source or "")
-
-    match = DURATION_RE.search(text)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
 async def _fetch_html_playwright(
     url: str,
     user_agent: str,
@@ -807,80 +612,63 @@ async def _fetch_html_playwright(
 
     timeout_ms = timeout_s * 1000
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=headless,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-                "--disable-software-rasterizer",
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                "--no-first-run",
-                "--single-process",
-                "--js-flags=--max-old-space-size=128",
-            ],
+        browser = await playwright.chromium.launch(headless=headless)
+        context = await browser.new_context(
+            user_agent=user_agent,
+            locale="pl-PL",
         )
-        try:
-            context = await browser.new_context(
-                user_agent=user_agent,
-                locale="pl-PL",
-            )
-            page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            logging.info("Page loaded: %s (title: %s)", url, await page.title())
-            await _maybe_accept_cookies(page)
-            await page.wait_for_timeout(2000)
-            content_len = len(await page.content())
-            logging.info("Page content length after cookies: %d", content_len)
+        page = await context.new_page()
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        await _maybe_accept_cookies(page)
+        await _try_set_week_view(page)
+        await _try_click_today(page)
+        # Avoid long waits: a short pause is usually enough for the schedule widget.
+        await page.wait_for_timeout(1000)
 
-            if wait_selector:
-                try:
-                    await page.wait_for_selector(wait_selector, timeout=timeout_ms)
-                except Exception:  # noqa: BLE001
-                    logging.debug("Wait selector not found: %s", wait_selector)
-            else:
-                fast_timeout = min(8000, max(3000, timeout_ms // 2))
-                found = await _wait_for_any_selector(page, DEFAULT_WAIT_SELECTORS, fast_timeout)
-                logging.info("Schedule selector found: %s", found)
-                if not found:
-                    await page.wait_for_timeout(3000)
-                    logging.info("Final content length: %d", len(await page.content()))
+        if wait_selector:
+            try:
+                await page.wait_for_selector(wait_selector, timeout=timeout_ms)
+            except Exception:  # noqa: BLE001
+                logging.debug("Wait selector not found: %s", wait_selector)
+        else:
+            fast_timeout = min(5000, max(1500, timeout_ms // 3))
+            await _wait_for_any_selector(page, DEFAULT_WAIT_SELECTORS, fast_timeout)
 
-            if seek_week:
-                now_dt = datetime.combine(today, time.min)
-                week_start, week_end = week_range(now_dt)
-                for _ in range(max_steps + 1):
-                    content = await page.content()
-                    result = _parse_slots_from_html(content, selector, today, url)
-                    if result.slots:
-                        week_slots = filter_slots_for_week(result.slots, now_dt)
-                        if week_slots:
-                            return content
+        if seek_week:
+            now_dt = datetime.combine(today, time.min)
+            week_start, week_end = week_range(now_dt)
+            for _ in range(max_steps + 1):
+                content = await page.content()
+                result = _parse_slots_from_html(content, selector, today)
+                if result.slots:
+                    week_slots = filter_slots_for_week(result.slots, now_dt)
+                    if week_slots:
+                        await browser.close()
+                        return content
 
-                        earliest = min(result.slots, key=lambda s: s.start).start
-                        latest = max(result.slots, key=lambda s: s.start).start
-                        if earliest > week_end:
-                            moved = await _click_prev(page)
-                        elif latest < week_start:
-                            moved = await _click_next(page)
-                        else:
-                            return content
+                    earliest = min(result.slots, key=lambda s: s.start).start
+                    latest = max(result.slots, key=lambda s: s.start).start
+                    if earliest > week_end:
+                        moved = await _click_prev(page)
+                    elif latest < week_start:
+                        moved = await _click_next(page)
+                    else:
+                        await browser.close()
+                        return content
 
-                        if not moved:
-                            return content
+                    if not moved:
+                        await browser.close()
+                        return content
 
-                        await page.wait_for_timeout(700)
-                        continue
+                    await page.wait_for_timeout(700)
+                    continue
 
-                    # No slots parsed; return whatever we have
-                    break
+                # No slots parsed; return whatever we have
+                break
 
-            return await page.content()
-        finally:
-            await browser.close()
+        content = await page.content()
+        await browser.close()
+        return content
 
 
 async def fetch_schedule(
@@ -899,16 +687,7 @@ async def fetch_schedule(
     today = (now.date() if now else datetime.now().date())
     if not use_playwright:
         html = await asyncio.to_thread(_fetch_html_requests, url, user_agent, timeout_s)
-        result = _parse_slots_from_html(html, selector, today, url)
-        if not result.slots:
-            return ScheduleResult(
-                slots=result.slots,
-                raw_count=result.raw_count,
-                debug_note=_summarize_html(html)
-                + ", "
-                + _fetch_html_diagnostics(url, user_agent, timeout_s),
-            )
-        return result
+        return _parse_slots_from_html(html, selector, today, url)
 
     # Try fast HTML fetch first; fall back to Playwright only if empty.
     html = await asyncio.to_thread(_fetch_html_requests, url, user_agent, timeout_s)
@@ -927,16 +706,7 @@ async def fetch_schedule(
         seek_week=playwright_seek_week,
         max_steps=playwright_max_steps,
     )
-    result = _parse_slots_from_html(html, selector, today, url)
-    if not result.slots:
-        return ScheduleResult(
-            slots=result.slots,
-            raw_count=result.raw_count,
-            debug_note=_summarize_html(html)
-            + ", "
-            + _fetch_html_diagnostics(url, user_agent, timeout_s),
-        )
-    return result
+    return _parse_slots_from_html(html, selector, today, url)
 
 
 def week_range(now: datetime) -> tuple[datetime, datetime]:
