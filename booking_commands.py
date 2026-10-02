@@ -274,6 +274,31 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(text)
 
 
+def _probe_one(session, url):
+    try:
+        r = session.get(url, timeout=25)
+        body = r.text
+        title = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
+        title = " ".join(title.group(1).split())[:80] if title else "-"
+        snippet = " ".join(re.sub(r"<[^>]+>", " ", body).split())[:160]
+        return (f"HTTP {r.status_code}, {len(body)} байт, элементов: {body.count('club-schedule-item')}, "
+                f"форма входа: {'да' if 'member_login_form' in body else 'нет'}\n"
+                f"title: {title}\nтекст: {snippet}")
+    except Exception as exc:  # noqa: BLE001
+        return f"ошибка: {type(exc).__name__}: {str(exc)[:150]}"
+
+
+@owner_only
+async def probe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/probe — что сайт отдаёт серверу: без сессии и с сессией."""
+    club = FAVORITES[0]
+    url = f"https://zdrofit.pl/kluby-fitness/{club}/grafik-zajec"
+    st = await asyncio.to_thread(store.load)
+    guest = await asyncio.to_thread(_probe_one, booker.make_session({}), url)
+    auth = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url)
+    await update.effective_message.reply_text(f"{club}\n\nБез сессии:\n{guest}\n\nС сессией:\n{auth}")
+
+
 async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     owner = _owner_id()
@@ -349,6 +374,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("resume", _set_paused(False)))
     app.add_handler(CommandHandler("cookie", cookie_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("probe", probe_cmd))
     app.add_handler(CommandHandler("myid", myid_cmd))
     app.add_handler(CommandHandler("booking", help_booking))
     app.add_handler(CallbackQueryHandler(book_callback, pattern=r"^bk:"))
