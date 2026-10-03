@@ -147,6 +147,7 @@ async def _handle_search(
     owner = _owner_id()
     if cards and owner and update.effective_user and update.effective_user.id == owner:
         limit = int(os.getenv("MAX_CARDS", "12"))
+        cards.sort(key=lambda c: c[1].start)  # по дате и времени, а не по клубам
         head = f"Нашёл {len(cards)} ближайших занятий по запросу «{query}»"
         if len(cards) > limit:
             head += f", показываю первые {limit} (уточните запрос, чтобы увидеть остальные)"

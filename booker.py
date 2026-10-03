@@ -25,8 +25,8 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 HORIZON_DAYS = int(os.getenv("MAX_DAYS_AHEAD", "14"))
 OPEN_BEFORE_HOURS = float(os.getenv("OPEN_BEFORE_HOURS", "48"))  # запись открывается за N часов до начала
-BURST_SECONDS = int(os.getenv("BURST_SECONDS", "45"))            # сколько длится частый опрос в «горячем» окне
-BURST_EVERY = float(os.getenv("BURST_EVERY", "2"))               # интервал частого опроса, секунды
+BURST_SECONDS = int(os.getenv("BURST_SECONDS", "55"))            # сколько длится частый опрос в «горячем» окне
+BURST_EVERY = float(os.getenv("BURST_EVERY", "1"))               # интервал частого опроса, секунды
 HOT_LEAD = 70      # «горячее» окно начинается за 70 с до расчётного открытия
 HOT_TAIL = 600     # и длится 10 минут после (если сайт открывает с задержкой)
 
@@ -135,7 +135,7 @@ def label(it: dict) -> str:
     return f"{it['name']} {it['start']:%a %d.%m %H:%M}, {it['club']} ({it['trainer'] or '—'})"
 
 
-def book(s: requests.Session, it: dict) -> tuple[bool, str, str]:
+def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str, str]:
     """Возвращает (успех, сообщение, текст ответа сервера для отладки)."""
     url = BASE + it["url"]
     xhr = {"X-Requested-With": "XMLHttpRequest",
@@ -147,6 +147,8 @@ def book(s: requests.Session, it: dict) -> tuple[bool, str, str]:
     if not form:
         if _logged_out(r.text):
             raise AuthError("session expired")
+        if quiet:  # пробная попытка в момент открытия: формы ещё нет, это не ошибка
+            return False, "", ""
         return False, "форма записи не найдена (возможно, уже записаны)", ""
     data = {i["name"]: i.get("value", "") for i in form.find_all("input") if i.get("name")}
     btn = form.find("button", {"type": "submit"})
@@ -163,7 +165,7 @@ def book(s: requests.Session, it: dict) -> tuple[bool, str, str]:
         new = state_of(fresh.get(it["id"], it))
     except Exception:
         new = "unknown"
-    ok = new == "booked" or (not still_form and new != "open")
+    ok = new == "booked" or (not still_form and new not in ("open", "early"))
     return ok, ("подтверждено" if new == "booked" else text[:200]), text
 
 
@@ -191,7 +193,24 @@ def _tick_locked() -> list[str]:
     last_resp = None
     next_hot = 0.0
     seen_early: set[str] = set()
+    alerts: dict[str, str] = {}
     clubs = all_clubs
+    def attempt(it: dict, quiet: bool = False) -> bool:
+        nonlocal last_resp
+        ok, msg, text = book(s, it, quiet=quiet)
+        last_resp = text or last_resp
+        if ok:
+            booked_ids.add(it["id"])
+            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat()})
+            msgs.append(f"✅ Записан: {label(it)}")
+            tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
+            if tgt:
+                CARD_UPDATES.append({"chat_id": tgt["chat_id"], "message_id": tgt["message_id"],
+                                     "html": tgt.get("card_html", "")})
+        elif msg:
+            msgs.append(f"⚠️ Не удалось записаться: {label(it)}\n{msg}")
+        return ok
+
     try:
         while True:
             now = now_local()
@@ -212,27 +231,32 @@ def _tick_locked() -> list[str]:
                     secs = (it["start"] - dt.timedelta(hours=OPEN_BEFORE_HOURS) - now).total_seconds()
                     if -HOT_TAIL <= secs <= HOT_LEAD:
                         hot_clubs.add(it["club"])
+                        waf.prewarm("zdrofit.pl")  # свежий токен защиты заранее, чтобы не ждать браузер в момент открытия
+                        if secs <= 2 and not it["full"] and it["id"] not in booked_ids:
+                            attempt(it, quiet=True)  # не ждём, пока страница расписания «переключится»: пробуем форму сразу
                     elif secs > HOT_LEAD:
                         w = secs - HOT_LEAD
                         wait_hot = w if wait_hot is None else min(wait_hot, w)
                     continue
                 if stt != "open" or it["full"]:
+                    if it["id"] in target_ids:  # занятие из очереди: сообщаем, почему не записали (один раз на причину)
+                        if stt == "open" and it["full"]:
+                            reason = "Запись открылась, но мест уже нет (скорее всего, заняли в первые секунды). Продолжу следить: если кто-то отпишется, запишу."
+                        elif stt == "closed":
+                            reason = "Запись уже закрыта."
+                        elif stt == "unknown":
+                            reason = f"Сайт показывает статус «{it['status']}», бот не умеет с ним работать."
+                        else:
+                            reason = None
+                        tg = next((t for t in st["targets"] if t["id"] == it["id"]), None)
+                        if reason and tg is not None and tg.get("alerted") != reason and it["id"] not in alerts:
+                            alerts[it["id"]] = reason
+                            msgs.append(f"⚠️ Не записал: {label(it)}\n{reason}")
                     continue
                 if it["id"] in seen_early and observed is None:  # поймали момент открытия
                     observed = {"label": label(it), "hours_before": round((it["start"] - now).total_seconds() / 3600, 2),
                                 "at": now.isoformat(timespec="seconds")}
-                ok, msg, text = book(s, it)
-                last_resp = text or last_resp
-                if ok:
-                    booked_ids.add(it["id"])
-                    new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat()})
-                    msgs.append(f"✅ Записан: {label(it)}")
-                    tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
-                    if tgt:
-                        CARD_UPDATES.append({"chat_id": tgt["chat_id"], "message_id": tgt["message_id"],
-                                             "html": tgt.get("card_html", "")})
-                else:
-                    msgs.append(f"⚠️ Не удалось записаться: {label(it)}\n{msg}")
+                attempt(it)
             if wait_hot is not None:
                 next_hot = time.time() + wait_hot
             if hot_clubs and time.time() - started < BURST_SECONDS:
@@ -268,6 +292,9 @@ def _tick_locked() -> list[str]:
         x["cookies"] = {**x["cookies"], **s.cookies.get_dict()}
         x["booked"] = [b for b in x["booked"] + new_booked if b["start"] > now.isoformat()]
         x["targets"] = [t for t in x["targets"] if t["id"] not in booked_ids and t["start"] > now.isoformat()]
+        for t in x["targets"]:
+            if t["id"] in alerts:
+                t["alerted"] = alerts[t["id"]]
         x["next_hot"] = next_hot
         if observed:
             x["open_observed"] = observed

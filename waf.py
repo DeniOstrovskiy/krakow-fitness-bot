@@ -82,6 +82,13 @@ def refresh(host: str, force: bool = False) -> dict:
         return cookies
 
 
+def prewarm(host: str, max_age: float = 150) -> None:
+    """Если защита сайта на этом хосте уже встречалась, обновляет токен заранее (до критичного момента)."""
+    cur = _CACHE.get(host)
+    if ENABLED and cur and cur["cookies"] and time.time() - cur["t"] > max_age:
+        refresh(host, force=True)
+
+
 class WafSession(requests.Session):
     """requests.Session, который сам проходит проверку WAF и повторяет запрос."""
 
