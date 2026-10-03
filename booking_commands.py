@@ -463,7 +463,7 @@ async def unqueue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     card_html = await asyncio.to_thread(store.update, rm)
     await q.answer("Автозапись отменена")
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Записаться", callback_data=f"bk:{club}:{item_id}")]])
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("✍️ Записаться", callback_data=f"bk:{club}:{item_id}")]])
     try:
         await q.edit_message_text(card_html, parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
     except Exception:

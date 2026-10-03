@@ -163,12 +163,27 @@ async def _handle_search(
 
 async def _send_cards(message, context, tz, cards, start: int, limit: int) -> None:
     """Отправляет карточки [start:start+limit], а если есть ещё, добавляет кнопку «Показать ещё»."""
+    try:
+        import store as _store
+        st = await asyncio.to_thread(_store.load)
+        booked_ids = {b["id"] for b in st.get("booked", [])}
+        queued_ids = {t["id"] for t in st.get("targets", [])}
+    except Exception:  # noqa: BLE001
+        booked_ids, queued_ids = set(), set()
     for short, slot, data in cards[start:start + limit]:
+        parts = data.split(":", 2)
+        item_id = parts[2] if len(parts) == 3 else ""
+        if item_id in booked_ids:
+            btn = InlineKeyboardButton("✅ Вы записаны", callback_data="noop")
+        elif item_id in queued_ids:
+            btn = InlineKeyboardButton("⏳ Жду открытия записи · отменить", callback_data=f"uq:{parts[1]}:{item_id}")
+        else:
+            btn = InlineKeyboardButton("✍️ Записаться", callback_data=data)
         await message.reply_text(
             f"<b>{html.escape(short)}</b>\n" + _format_slot(slot, tz, html_mode=True),
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Записаться", callback_data=data)]]),
+            reply_markup=InlineKeyboardMarkup([[btn]]),
         )
         await asyncio.sleep(0.3)
     nxt = start + limit
