@@ -192,6 +192,7 @@ def _build_list(st):
         rows.append([InlineKeyboardButton(f"❌ Отменить {i}", callback_data=f"lr:{t['id']}")])
     if st["booked"]:
         lines += ["", "Записан:"] + [f"• {b['label']}" for b in sorted(st["booked"], key=lambda b: b["start"])]
+        rows.append([InlineKeyboardButton("🔄 Сверить «Записан» с сайтом", callback_data="sync")])
     if st["paused"]:
         lines.append("\n⏸ Бот на паузе")
     return "\n".join(lines), (InlineKeyboardMarkup(rows) if rows else None)
@@ -224,6 +225,68 @@ async def list_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await q.edit_message_text(text, reply_markup=markup)
     except Exception:
         pass
+
+
+def _sync_booked() -> str:
+    """Сверяет «Записан» с сайтом: убирает занятия, на которые на сайте вы уже не записаны."""
+    st = store.load()
+    now = booker.now_local().isoformat()
+    todo = [b for b in st["booked"] if b["start"] > now]
+    if not todo:
+        return "Сверять нечего."
+    s = booker.make_session(st["cookies"])
+    cache: dict[str, dict] = {}
+    removed, kept, unknown = [], 0, []
+    for b in todo:
+        club = b.get("club") or (re.search(r", ([\w-]+) \([^()]*\)$", b["label"]) or [None, None])[1]
+        if not club:
+            unknown.append(b["label"])
+            continue
+        if club not in cache:
+            cache[club] = {it["id"]: it for it in booker.fetch_club(s, club)}
+        it = cache[club].get(b["id"])
+        if it is None:
+            unknown.append(b["label"])
+        elif booker.state_of(it) == "booked":
+            kept += 1
+        else:
+            removed.append(b)
+    if removed:
+        ids = {b["id"] for b in removed}
+        store.update(lambda x: x.update(booked=[b for b in x["booked"] if b["id"] not in ids]))
+    out = [f"Сверка с сайтом: подтверждено {kept}, снято {len(removed)}."]
+    out += [f"✖ Снято (на сайте не записан): {b['label']}" for b in removed]
+    out += [f"? Не нашёл на сайте: {l}" for l in unknown]
+    return "\n".join(out)
+
+
+async def sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    owner = _owner_id()
+    if not owner or q.from_user.id != owner:
+        await q.answer("Нет доступа", show_alert=True)
+        return
+    await q.answer("Сверяю…")
+    try:
+        text = await asyncio.to_thread(_sync_booked)
+    except Exception as e:  # noqa: BLE001
+        text = f"Не удалось сверить: {e!r}"
+    await q.message.reply_text(text)
+    st = await asyncio.to_thread(store.load)
+    t, markup = _build_list(st)
+    try:
+        await q.edit_message_text(t, reply_markup=markup)
+    except Exception:
+        pass
+
+
+@owner_only
+async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        text = await asyncio.to_thread(_sync_booked)
+    except Exception as e:  # noqa: BLE001
+        text = f"Не удалось сверить: {e!r}"
+    await update.effective_message.reply_text(text)
 
 
 @owner_only
@@ -458,6 +521,8 @@ def register(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(book_callback, pattern=r"^bk:"))
     app.add_handler(CallbackQueryHandler(unqueue_callback, pattern=r"^uq:"))
     app.add_handler(CallbackQueryHandler(list_remove_callback, pattern=r"^lr:"))
+    app.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync$"))
+    app.add_handler(CommandHandler("sync", sync_cmd))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
 
 

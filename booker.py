@@ -212,7 +212,7 @@ def _tick_locked() -> list[str]:
         last_resp = text or last_resp
         if ok:
             booked_ids.add(it["id"])
-            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat()})
+            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat(), "club": it["club"]})
             msgs.append(f"✅ Записан: {label(it)}")
             tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
             if tgt:
@@ -394,7 +394,7 @@ def book_now(club: str, item_id: str) -> str:
                 if text:
                     x["last_response"] = text
                 if ok:
-                    x["booked"].append({"id": it["id"], "label": lab, "start": it["start"].isoformat()})
+                    x["booked"].append({"id": it["id"], "label": lab, "start": it["start"].isoformat(), "club": it["club"]})
                     x["targets"] = [t for t in x["targets"] if t["id"] != it["id"]]
             store.update(save)
             return f"✅ Записан: {lab}" if ok else f"⚠️ Не удалось записаться: {lab}\n{msg}"
