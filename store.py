@@ -9,7 +9,7 @@ from pathlib import Path
 
 import requests
 
-KEY = "zdrofit:state"
+KEY = os.getenv("STORE_KEY", "").strip() or "zdrofit:state"  # у каждого бота свой ключ, если база общая
 FILE = Path(__file__).with_name("data.json")
 DEFAULT = {
     "watches": [],      # [{club, activity, trainer, days, time_from, time_to}]
