@@ -8,8 +8,8 @@ import os
 import re
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import booker
 import store
@@ -390,7 +390,32 @@ async def help_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(HELP)
 
 
+BTN_LIST, BTN_STATUS, BTN_PAUSE, BTN_RESUME, BTN_HELP = "📋 Список", "📊 Статус", "⏸ Пауза", "▶️ Продолжить", "❓ Помощь"
+MENU = ReplyKeyboardMarkup(
+    [[BTN_LIST, BTN_STATUS], [BTN_PAUSE, BTN_RESUME, BTN_HELP]],
+    resize_keyboard=True, is_persistent=True)
+_BUTTONS: dict = {}
+
+
+@owner_only
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает постоянные кнопки внизу экрана (/menu, а также после /start)."""
+    await update.effective_message.reply_text("Кнопки включены ⬇️", reply_markup=MENU)
+
+
+async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    fn = _BUTTONS.get((update.effective_message.text or "").strip())
+    if fn:
+        await fn(update, context)
+
+
 def register(app: Application) -> None:
+    _BUTTONS.update({BTN_LIST: list_cmd, BTN_STATUS: status_cmd, BTN_PAUSE: _set_paused(True),
+                     BTN_RESUME: _set_paused(False), BTN_HELP: help_booking})
+    pattern = "^(" + "|".join(re.escape(b) for b in _BUTTONS) + ")$"
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(pattern), button_router))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("start", menu_cmd), group=1)  # после обычного ответа /start
     app.add_handler(CommandHandler("watch", watch_cmd))
     app.add_handler(CommandHandler("list", list_cmd))
     app.add_handler(CommandHandler("remove", remove_cmd))

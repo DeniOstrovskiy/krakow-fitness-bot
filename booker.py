@@ -27,6 +27,12 @@ HORIZON_DAYS = int(os.getenv("MAX_DAYS_AHEAD", "14"))
 OPEN_BEFORE_HOURS = float(os.getenv("OPEN_BEFORE_HOURS", "48"))  # запись открывается за N часов до начала
 BURST_SECONDS = int(os.getenv("BURST_SECONDS", "55"))            # сколько длится частый опрос в «горячем» окне
 BURST_EVERY = float(os.getenv("BURST_EVERY", "1"))               # интервал частого опроса, секунды
+FAST_LEAD = float(os.getenv("FAST_LEAD", "3"))       # быстрая фаза начинается за N с до расчётного открытия
+FAST_EVERY = float(os.getenv("FAST_EVERY", "0.25"))  # пауза между пробами формы, секунды
+FAST_SECONDS = float(os.getenv("FAST_SECONDS", "20"))  # сколько длится быстрая фаза
+FAST_POSTS = int(os.getenv("FAST_POSTS", "30"))      # максимум отправок формы на занятие за фазу
+FAST_AFTER = float(os.getenv("FAST_AFTER", "30"))      # быстрая фаза работает до N с после расчётного открытия (дальше только обычный опрос)
+WARM_LEAD = 10     # за столько секунд до открытия делаем «прогревающий» запрос
 HOT_LEAD = 70      # «горячее» окно начинается за 70 с до расчётного открытия
 HOT_TAIL = 600     # и длится 10 минут после (если сайт открывает с задержкой)
 
@@ -148,7 +154,7 @@ def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str,
         if _logged_out(r.text):
             raise AuthError("session expired")
         if quiet:  # пробная попытка в момент открытия: формы ещё нет, это не ошибка
-            return False, "", ""
+            return False, None, ""
         return False, "форма записи не найдена (возможно, уже записаны)", ""
     data = {i["name"]: i.get("value", "") for i in form.find_all("input") if i.get("name")}
     btn = form.find("button", {"type": "submit"})
@@ -165,6 +171,8 @@ def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str,
         new = state_of(fresh.get(it["id"], it))
     except Exception:
         new = "unknown"
+    if quiet and new == "early" and not ("wypisz" in text.lower()):
+        return False, None, text  # форму приняли, но запись ещё не открыта: пробуем дальше
     ok = new == "booked" or (not still_form and new not in ("open", "early"))
     return ok, ("подтверждено" if new == "booked" else text[:200]), text
 
@@ -195,9 +203,12 @@ def _tick_locked() -> list[str]:
     seen_early: set[str] = set()
     alerts: dict[str, str] = {}
     clubs = all_clubs
-    def attempt(it: dict, quiet: bool = False) -> bool:
+    def attempt(it: dict, quiet: bool = False, final: bool = True):
+        """True — записали, False — отказ сайта, None — формы ещё нет (только quiet)."""
         nonlocal last_resp
         ok, msg, text = book(s, it, quiet=quiet)
+        if msg is None:
+            return None
         last_resp = text or last_resp
         if ok:
             booked_ids.add(it["id"])
@@ -207,9 +218,44 @@ def _tick_locked() -> list[str]:
             if tgt:
                 CARD_UPDATES.append({"chat_id": tgt["chat_id"], "message_id": tgt["message_id"],
                                      "html": tgt.get("card_html", "")})
-        elif msg:
+        elif final:
             msgs.append(f"⚠️ Не удалось записаться: {label(it)}\n{msg}")
         return ok
+
+    warmed: set[str] = set()
+
+    def warm(it: dict) -> None:
+        """Прогрев: один лёгкий запрос к странице формы, чтобы соединение и токен защиты были готовы."""
+        if it["id"] in warmed:
+            return
+        warmed.add(it["id"])
+        try:
+            s.get(BASE + it["url"], headers={"X-Requested-With": "XMLHttpRequest"}, timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def fast_phase(due: list) -> None:
+        """Быстрая фаза: опрашиваем страницу формы каждые FAST_EVERY с и отправляем запись, как только форма появилась."""
+        t_end = time.time() + FAST_SECONDS
+        pending = {it["id"]: it for it in due}
+        posts: dict[str, int] = {}
+        while pending and time.time() < t_end:
+            for iid, it in list(pending.items()):
+                try:
+                    res = attempt(it, quiet=True, final=False)
+                except AuthError:
+                    raise
+                except Exception:  # noqa: BLE001 — сеть: пробуем дальше, запасной путь подхватит
+                    res = None
+                if res is True:
+                    pending.pop(iid)
+                elif res is False:
+                    posts[iid] = posts.get(iid, 0) + 1
+                    if posts[iid] >= FAST_POSTS:
+                        msgs.append(f"⚠️ Не удалось записаться: {label(it)}\n{(last_resp or '')[:200]}")
+                        pending.pop(iid)
+            if pending:
+                time.sleep(FAST_EVERY)
 
     try:
         while True:
@@ -220,6 +266,7 @@ def _tick_locked() -> list[str]:
                 items += fetch_club(s, club)
             hot_clubs: set[str] = set()
             wait_hot = None
+            fast_due: list = []
             for it in items:
                 if not (now < it["start"] <= horizon) or it["id"] in booked_ids:
                     continue
@@ -232,8 +279,10 @@ def _tick_locked() -> list[str]:
                     if -HOT_TAIL <= secs <= HOT_LEAD:
                         hot_clubs.add(it["club"])
                         waf.prewarm("zdrofit.pl")  # свежий токен защиты заранее, чтобы не ждать браузер в момент открытия
-                        if secs <= 2 and not it["full"] and it["id"] not in booked_ids:
-                            attempt(it, quiet=True)  # не ждём, пока страница расписания «переключится»: пробуем форму сразу
+                        if secs <= WARM_LEAD:
+                            warm(it)
+                        if -FAST_AFTER <= secs <= FAST_LEAD and not it["full"] and it["id"] not in booked_ids:
+                            fast_due.append(it)  # быстрая фаза: не ждём, пока расписание «переключится»
                     elif secs > HOT_LEAD:
                         w = secs - HOT_LEAD
                         wait_hot = w if wait_hot is None else min(wait_hot, w)
@@ -256,7 +305,14 @@ def _tick_locked() -> list[str]:
                 if it["id"] in seen_early and observed is None:  # поймали момент открытия
                     observed = {"label": label(it), "hours_before": round((it["start"] - now).total_seconds() / 3600, 2),
                                 "at": now.isoformat(timespec="seconds")}
-                attempt(it)
+                try:
+                    attempt(it)
+                except AuthError:
+                    raise
+                except Exception:  # noqa: BLE001 — сбой сети в критический момент: не обрываем, повторим в этом же прогоне
+                    hot_clubs.add(it["club"])
+            if fast_due:
+                fast_phase(fast_due)  # если не сработает, ниже цикл продолжится по старой схеме (опрос расписания)
             if wait_hot is not None:
                 next_hot = time.time() + wait_hot
             if hot_clubs and time.time() - started < BURST_SECONDS:
