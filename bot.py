@@ -146,20 +146,10 @@ async def _handle_search(
 
     owner = _owner_id()
     if cards and owner and update.effective_user and update.effective_user.id == owner:
-        limit = int(os.getenv("MAX_CARDS", "12"))
+        limit = int(os.getenv("MAX_CARDS", "10"))
         cards.sort(key=lambda c: c[1].start)  # по дате и времени, а не по клубам
-        head = f"Нашёл {len(cards)} ближайших занятий по запросу «{query}»"
-        if len(cards) > limit:
-            head += f", показываю первые {limit} (уточните запрос, чтобы увидеть остальные)"
-        await update.message.reply_text(head + ":")
-        for short, slot, data in cards[:limit]:
-            await update.message.reply_text(
-                f"<b>{html.escape(short)}</b>\n" + _format_slot(slot, tz, html_mode=True),
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Записаться", callback_data=data)]]),
-            )
-            await asyncio.sleep(0.3)
+        await update.message.reply_text(f"Нашёл {len(cards)} ближайших занятий по запросу «{query}»:")
+        await _send_cards(update.message, context, tz, cards, 0, limit)
         if error_lines:
             await update.message.reply_text("\n".join(error_lines))
         return
@@ -169,6 +159,53 @@ async def _handle_search(
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
+
+async def _send_cards(message, context, tz, cards, start: int, limit: int) -> None:
+    """Отправляет карточки [start:start+limit], а если есть ещё, добавляет кнопку «Показать ещё»."""
+    for short, slot, data in cards[start:start + limit]:
+        await message.reply_text(
+            f"<b>{html.escape(short)}</b>\n" + _format_slot(slot, tz, html_mode=True),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Записаться", callback_data=data)]]),
+        )
+        await asyncio.sleep(0.3)
+    nxt = start + limit
+    if nxt < len(cards):
+        import uuid
+        store = context.bot_data.setdefault("more_cards", {})
+        key = uuid.uuid4().hex[:8]
+        store[key] = {"cards": cards, "pos": nxt}
+        while len(store) > 20:  # не копим старые поиски
+            store.pop(next(iter(store)))
+        left = len(cards) - nxt
+        await message.reply_text(
+            f"Показано {nxt} из {len(cards)}.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"➡️ Показать ещё {min(limit, left)}", callback_data=f"more:{key}")]]),
+        )
+
+
+async def more_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    owner = _owner_id()
+    if not owner or q.from_user.id != owner:
+        await q.answer("Нет доступа", show_alert=True)
+        return
+    key = q.data.split(":", 1)[1]
+    entry = context.bot_data.get("more_cards", {}).pop(key, None)
+    if not entry:
+        await q.answer("Поиск устарел, повторите запрос", show_alert=True)
+        return
+    await q.answer()
+    try:  # убираем кнопку у старого сообщения
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    cfg = context.bot_data["config"]
+    limit = int(os.getenv("MAX_CARDS", "10"))
+    await _send_cards(q.message, context, cfg.timezone, entry["cards"], entry["pos"], limit)
 
 
 STATUS_LABELS = {

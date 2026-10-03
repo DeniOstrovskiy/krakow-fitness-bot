@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()  # до импорта модулей, которые читают окружение
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 import bot as legacy
 import booking_commands as bc
@@ -35,6 +35,7 @@ def build_app(cfg, webhook: bool) -> Application:
     app.add_handler(CommandHandler("help", legacy.help_command))
     app.add_handler(CommandHandler("debug", legacy.debug_command))
     app.add_handler(CommandHandler("trainer", legacy.trainer_command))
+    app.add_handler(CallbackQueryHandler(legacy.more_callback, pattern=r"^more:"))
     app.add_handler(CommandHandler("coach", legacy.trainer_command))
     bc.register(app)  # до общего текстового обработчика
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, legacy.handle_query))
