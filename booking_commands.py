@@ -183,18 +183,47 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"Добавлено: {describe(w)}{warn}")
 
 
-@owner_only
-async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    st = await asyncio.to_thread(store.load)
+def _build_list(st):
     lines = ["Отслеживаю:" if (st["watches"] or st["targets"]) else "Отслеживание пусто. Добавьте через /watch"]
     lines += [f"{i}. {describe(w)}" for i, w in enumerate(st["watches"], 1)]
+    rows = []
     for i, t in enumerate(st["targets"], len(st["watches"]) + 1):
         lines.append(f"{i}. ⏳ {t['label']} (ждёт, когда можно будет записаться)")
+        rows.append([InlineKeyboardButton(f"❌ Отменить {i}", callback_data=f"lr:{t['id']}")])
     if st["booked"]:
         lines += ["", "Записан:"] + [f"• {b['label']}" for b in sorted(st["booked"], key=lambda b: b["start"])]
     if st["paused"]:
         lines.append("\n⏸ Бот на паузе")
-    await update.effective_message.reply_text("\n".join(lines))
+    return "\n".join(lines), (InlineKeyboardMarkup(rows) if rows else None)
+
+
+@owner_only
+async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = await asyncio.to_thread(store.load)
+    text, markup = _build_list(st)
+    await update.effective_message.reply_text(text, reply_markup=markup)
+
+
+async def list_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    owner = _owner_id()
+    if not owner or q.from_user.id != owner:
+        await q.answer("Нет доступа", show_alert=True)
+        return
+    item_id = q.data.split(":", 1)[1]
+
+    def rm(st):
+        for t in list(st["targets"]):
+            if t["id"] == item_id:
+                st["targets"].remove(t)
+        return _build_list(st)
+
+    text, markup = await asyncio.to_thread(store.update, rm)
+    await q.answer("Отменено")
+    try:
+        await q.edit_message_text(text, reply_markup=markup)
+    except Exception:
+        pass
 
 
 @owner_only
@@ -428,6 +457,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("booking", help_booking))
     app.add_handler(CallbackQueryHandler(book_callback, pattern=r"^bk:"))
     app.add_handler(CallbackQueryHandler(unqueue_callback, pattern=r"^uq:"))
+    app.add_handler(CallbackQueryHandler(list_remove_callback, pattern=r"^lr:"))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
 
 
