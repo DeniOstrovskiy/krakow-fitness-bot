@@ -47,7 +47,7 @@ def load_config() -> Config:
     club_name_raw = os.getenv("CLUB_NAME")
     club_name = (club_name_raw or "MyFitnessPlace").strip()
     club_names = os.getenv("CLUB_NAMES", "").strip()
-    max_results = int(os.getenv("MAX_RESULTS", "20"))
+    max_results = int(os.getenv("MAX_RESULTS", "50"))
     user_agent = os.getenv(
         "USER_AGENT",
         "Mozilla/5.0 (compatible; TgScheduleBot/1.0; +https://t.me/)",
