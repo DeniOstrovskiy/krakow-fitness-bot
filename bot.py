@@ -180,7 +180,7 @@ async def _send_cards(message, context, tz, cards, start: int, limit: int) -> No
         else:
             btn = InlineKeyboardButton("✍️ Записаться", callback_data=data)
         await message.reply_text(
-            f"<b>{html.escape(short)}</b>\n" + _format_slot(slot, tz, html_mode=True),
+            f"📍 <b>{html.escape(short)}</b>\n" + _format_slot(slot, tz, html_mode=True),
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup([[btn]]),
@@ -248,7 +248,7 @@ def _format_slot(slot, tz, html_mode: bool = False) -> str:
         start_local = start_dt.replace(tzinfo=tz)
     else:
         start_local = start_dt.astimezone(tz)
-    date_str = start_local.strftime("%a %d.%m %H:%M")
+    date_str = start_local.strftime("%a %d.%m — %H:%M")
     trainer = f" - {slot.trainer}" if slot.trainer else ""
     parts: list[str] = []
 
@@ -265,7 +265,7 @@ def _format_slot(slot, tz, html_mode: bool = False) -> str:
     else:
         suffix = ""
 
-    line = f"- {date_str} - {slot.name}{trainer}{suffix}"
+    line = f"{date_str}\n{slot.name}{trainer}{suffix}"
     if getattr(slot, "url", None):
         line = f"{line}\n{slot.url}"
 
@@ -278,7 +278,7 @@ def _format_slot(slot, tz, html_mode: bool = False) -> str:
     parts_html = "\n".join(html.escape(part) for part in parts)
     suffix_html = f"\n{parts_html}" if parts_html else ""
     url_html = f"\n{html.escape(slot.url)}" if getattr(slot, "url", None) else ""
-    return f"- <b>{date_html}</b> - <b>{name_html}</b>{trainer_html}{suffix_html}{url_html}"
+    return f"<b>{date_html}</b>\n💪 <b>{name_html}</b>{trainer_html}{suffix_html}{url_html}"
 
 
 def _build_webhook_url(base_url: str, path: str) -> str:

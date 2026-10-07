@@ -23,15 +23,7 @@ FAVORITES = [c.strip() for c in os.getenv(
     "krakow-galeria-kazimierz,krakow-high5ive,krakow-kapelanka,krakow-garden-residence,krakow-przybyszewskiego,krakow-dytmara,krakow-lindego",
 ).split(",") if c.strip()]
 
-CLUB_TITLES = {
-    "krakow-galeria-kazimierz": "Galeria Kazimierz",
-    "krakow-high5ive": "High5ive",
-    "krakow-kapelanka": "Kapelanka",
-    "krakow-garden-residence": "Garden Residence",
-    "krakow-przybyszewskiego": "Przybyszewskiego",
-    "krakow-dytmara": "Dytmara",
-    "krakow-lindego": "Lindego 1c",
-}
+CLUB_TITLES = booker.CLUB_TITLES
 
 
 def club_title(slug: str) -> str:
@@ -185,25 +177,29 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _build_list(st):
-    lines = ["Отслеживаю:" if (st["watches"] or st["targets"]) else "Отслеживание пусто. Добавьте через /watch"]
-    lines += [f"{i}. {describe(w)}" for i, w in enumerate(st["watches"], 1)]
+    """Возвращает (HTML-текст, клавиатура)."""
+    head = "Отслеживаю:" if (st["watches"] or st["targets"]) else "Отслеживание пусто. Добавьте через /watch"
+    blocks = [head]
+    blocks += [f"{i}. {booker.rich(describe(w))}" for i, w in enumerate(st["watches"], 1)]
     rows = []
     for i, t in enumerate(st["targets"], len(st["watches"]) + 1):
-        lines.append(f"{i}. ⏳ {t['label']} (ждёт, когда можно будет записаться)")
+        blocks.append(f"{i}. ⏳ {booker.rich_label(t['label'])}\nждёт открытия записи")
         rows.append([InlineKeyboardButton(f"❌ Отменить {i}", callback_data=f"lr:{t['id']}")])
     if st["booked"]:
-        lines += ["", "Записан:"] + [f"• {b['label']}" for b in sorted(st["booked"], key=lambda b: b["start"])]
+        blocks.append("Записан:")
+        blocks += [f"📅 {booker.rich_label(b['label'])}"
+                   for b in sorted(st["booked"], key=lambda b: b["start"])]
         rows.append([InlineKeyboardButton("🔄 Сверить «Записан» с сайтом", callback_data="sync")])
     if st["paused"]:
-        lines.append("\n⏸ Бот на паузе")
-    return "\n".join(lines), (InlineKeyboardMarkup(rows) if rows else None)
+        blocks.append("⏸ Бот на паузе")
+    return "\n\n".join(blocks), (InlineKeyboardMarkup(rows) if rows else None)
 
 
 @owner_only
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await asyncio.to_thread(store.load)
     text, markup = _build_list(st)
-    await update.effective_message.reply_text(text, reply_markup=markup)
+    await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 async def list_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,7 +219,7 @@ async def list_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     text, markup = await asyncio.to_thread(store.update, rm)
     await q.answer("Отменено")
     try:
-        await q.edit_message_text(text, reply_markup=markup)
+        await q.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
     except Exception:
         pass
 
@@ -239,15 +235,15 @@ def _sync_booked() -> str:
     cache: dict[str, dict] = {}
     removed, kept, unknown = [], 0, []
     for b in todo:
-        club = b.get("club") or (re.search(r", ([\w-]+) \([^()]*\)$", b["label"]) or [None, None])[1]
+        club = b.get("club") or booker.club_of(b["label"])
         if not club:
-            unknown.append(b["label"])
+            unknown.append(booker.flat(b["label"]))
             continue
         if club not in cache:
             cache[club] = {it["id"]: it for it in booker.fetch_club(s, club)}
         it = cache[club].get(b["id"])
         if it is None:
-            unknown.append(b["label"])
+            unknown.append(booker.flat(b["label"]))
         elif booker.state_of(it) == "booked":
             kept += 1
         else:
@@ -256,7 +252,7 @@ def _sync_booked() -> str:
         ids = {b["id"] for b in removed}
         store.update(lambda x: x.update(booked=[b for b in x["booked"] if b["id"] not in ids]))
     out = [f"Сверка с сайтом: подтверждено {kept}, снято {len(removed)}."]
-    out += [f"✖ Снято (на сайте не записан): {b['label']}" for b in removed]
+    out += [f"✖ Снято (на сайте не записан): {booker.flat(b['label'])}" for b in removed]
     out += [f"? Не нашёл на сайте: {l}" for l in unknown]
     return "\n".join(out)
 
@@ -276,7 +272,7 @@ async def sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = await asyncio.to_thread(store.load)
     t, markup = _build_list(st)
     try:
-        await q.edit_message_text(t, reply_markup=markup)
+        await q.edit_message_text(t, reply_markup=markup, parse_mode="HTML")
     except Exception:
         pass
 
@@ -303,7 +299,7 @@ async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return describe(st["watches"].pop(n - 1))
         k = n - len(st["watches"]) - 1
         if 0 <= k < len(st["targets"]):
-            return st["targets"].pop(k)["label"]
+            return booker.flat(st["targets"].pop(k)["label"])
 
     w = await asyncio.to_thread(store.update, rm)
     await update.effective_message.reply_text(f"Удалено: {w}" if w else "Нет такого номера")
@@ -368,7 +364,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"\nЧастый опрос начнётся через {left // 3600} ч {left % 3600 // 60} мин"
     if st.get("open_observed"):
         o = st["open_observed"]
-        text += f"\nПоследнее наблюдённое открытие: {o['label']} за {o['hours_before']} ч до начала"
+        text += f"\nПоследнее наблюдённое открытие: {booker.flat(o['label'])} за {o['hours_before']} ч до начала"
     if st["last_response"]:
         text += f"\n\nОтвет сайта на последнюю запись:\n{st['last_response'][:600]}"
     await update.effective_message.reply_text(text)
@@ -441,10 +437,10 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         markup = None
     try:
-        await q.edit_message_text(card_html + "\n\n" + html.escape(text), parse_mode="HTML",
+        await q.edit_message_text(card_html + "\n\n" + booker.rich(text), parse_mode="HTML",
                                   disable_web_page_preview=True, reply_markup=markup)
     except Exception:
-        await msg.reply_text(text)
+        await msg.reply_text(booker.rich(text), parse_mode="HTML")
 
 
 async def unqueue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -542,7 +538,7 @@ async def run_tick(app: Application) -> list[str]:
     if owner:
         for m in msgs:
             try:
-                await app.bot.send_message(owner, m)
+                await app.bot.send_message(owner, booker.rich(m), parse_mode="HTML")
             except Exception:
                 pass
     return msgs

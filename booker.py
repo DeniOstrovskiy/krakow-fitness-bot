@@ -137,8 +137,79 @@ def matches(it: dict, w: dict) -> bool:
     return True
 
 
+CLUB_TITLES = {
+    "krakow-galeria-kazimierz": "Galeria Kazimierz",
+    "krakow-high5ive": "High5ive",
+    "krakow-kapelanka": "Kapelanka",
+    "krakow-garden-residence": "Garden Residence",
+    "krakow-przybyszewskiego": "Przybyszewskiego",
+    "krakow-dytmara": "Dytmara",
+    "krakow-lindego": "Lindego 1c",
+}
+_DOW_EN = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_OLD_LABEL = re.compile(r"^(?P<name>.*?) (?P<d>" + _DOW_EN + r") (?P<dm>\d\d\.\d\d) (?P<t>\d\d:\d\d), "
+                        r"(?P<club>[\w-]+) \((?P<tr>[^()]*)\)$")
+_BLOCK = re.compile(r"^([^\n]+)\n(" + _DOW_EN + r" \d\d\.\d\d \d\d:\d\d)\n([^\n]+)$", re.M)
+
+
+def club_title(slug: str) -> str:
+    return CLUB_TITLES.get(slug) or slug.removeprefix("krakow-").replace("-", " ").title()
+
+
+def _person(s: str) -> str:
+    s = (s or "").replace("_", " ").strip()
+    return s.title() if s and s == s.lower() else s
+
+
 def label(it: dict) -> str:
-    return f"{it['name']} {it['start']:%a %d.%m %H:%M}, {it['club']} ({it['trainer'] or '—'})"
+    """Три строки: клуб / «Mon 12.10 10:00» / «Название - Тренер»."""
+    tr = f" - {_person(it.get('trainer'))}" if it.get("trainer") else ""
+    return f"{club_title(it['club'])}\n{it['start']:%a %d.%m %H:%M}\n{it['name']}{tr}"
+
+
+def norm_label(s: str) -> str:
+    """Старые подписи («Название Mon 05.10 08:00, клуб (тренер)») приводит к новому виду."""
+    m = _OLD_LABEL.match(s or "")
+    if not m:
+        return s
+    tr = m["tr"].strip()
+    tr = f" - {_person(tr)}" if tr and tr != "—" else ""
+    return f"{club_title(m['club'])}\n{m['d']} {m['dm']} {m['t']}\n{m['name']}{tr}"
+
+
+def _block_html(m) -> str:
+    third = m.group(3)
+    name, sep, tr = third.partition(" - ")
+    return f"📍 <b>{m.group(1)}</b>\n<b>{m.group(2)[:-6]} — {m.group(2)[-5:]}</b>\n💪 <b>{name}</b>{sep}{tr}"
+
+
+def rich_label(lab: str) -> str:
+    """Подпись занятия в HTML: клуб, дата со временем и название жирным."""
+    import html as _h
+    lab = _h.escape(norm_label(lab))
+    out = _BLOCK.sub(_block_html, lab)
+    return out
+
+
+def rich(text: str) -> str:
+    """Экранирует текст для Telegram HTML и оформляет подписи занятий внутри него."""
+    import html as _h
+    return _BLOCK.sub(_block_html, _h.escape(text))
+
+
+def flat(s: str) -> str:
+    return norm_label(s).replace("\n", ", ")
+
+
+def club_of(lab: str):
+    m = _OLD_LABEL.match(lab or "")
+    if m:
+        return m["club"]
+    first = (lab or "").split("\n", 1)[0]
+    for slug, title in CLUB_TITLES.items():
+        if title == first:
+            return slug
+    return None
 
 
 def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str, str]:
@@ -213,13 +284,13 @@ def _tick_locked() -> list[str]:
         if ok:
             booked_ids.add(it["id"])
             new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat(), "club": it["club"]})
-            msgs.append(f"✅ Записан: {label(it)}")
+            msgs.append(f"✅ Записан\n{label(it)}")
             tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
             if tgt:
                 CARD_UPDATES.append({"chat_id": tgt["chat_id"], "message_id": tgt["message_id"],
                                      "html": tgt.get("card_html", "")})
         elif final:
-            msgs.append(f"⚠️ Не удалось записаться: {label(it)}\n{msg}")
+            msgs.append(f"⚠️ Не удалось записаться\n{label(it)}\n{msg}")
         return ok
 
     warmed: set[str] = set()
@@ -252,7 +323,7 @@ def _tick_locked() -> list[str]:
                 elif res is False:
                     posts[iid] = posts.get(iid, 0) + 1
                     if posts[iid] >= FAST_POSTS:
-                        msgs.append(f"⚠️ Не удалось записаться: {label(it)}\n{(last_resp or '')[:200]}")
+                        msgs.append(f"⚠️ Не удалось записаться\n{label(it)}\n{(last_resp or '')[:200]}")
                         pending.pop(iid)
             if pending:
                 time.sleep(FAST_EVERY)
@@ -300,7 +371,7 @@ def _tick_locked() -> list[str]:
                         tg = next((t for t in st["targets"] if t["id"] == it["id"]), None)
                         if reason and tg is not None and tg.get("alerted") != reason and it["id"] not in alerts:
                             alerts[it["id"]] = reason
-                            msgs.append(f"⚠️ Не записал: {label(it)}\n{reason}")
+                            msgs.append(f"⚠️ Не записал\n{label(it)}\n{reason}")
                     continue
                 if it["id"] in seen_early and observed is None:  # поймали момент открытия
                     observed = {"label": label(it), "hours_before": round((it["start"] - now).total_seconds() / 3600, 2),
@@ -378,9 +449,9 @@ def book_now(club: str, item_id: str) -> str:
         lab = label(it)
         stt = state_of(it)
         if stt == "booked" or item_id in {b["id"] for b in st["booked"]}:
-            return f"Вы уже записаны: {lab}"
+            return f"Вы уже записаны\n{lab}"
         if stt == "closed" or it["start"] <= now_local():
-            return f"⛔ Запись закрыта: {lab}"
+            return f"⛔ Запись закрыта\n{lab}"
         if stt == "open" and not it["full"]:
             try:
                 ok, msg, text = book(s, it)
@@ -397,7 +468,7 @@ def book_now(club: str, item_id: str) -> str:
                     x["booked"].append({"id": it["id"], "label": lab, "start": it["start"].isoformat(), "club": it["club"]})
                     x["targets"] = [t for t in x["targets"] if t["id"] != it["id"]]
             store.update(save)
-            return f"✅ Записан: {lab}" if ok else f"⚠️ Не удалось записаться: {lab}\n{msg}"
+            return f"✅ Записан\n{lab}" if ok else f"⚠️ Не удалось записаться\n{lab}\n{msg}"
         if stt in ("open", "early"):
             def queue(x):
                 if not any(t["id"] == it["id"] for t in x["targets"]):
@@ -405,4 +476,4 @@ def book_now(club: str, item_id: str) -> str:
             store.update(queue)
             why = "мест нет" if (stt == "open" and it["full"]) else "запись ещё не открыта (обычно открывается за ~48 ч до начала)"
             return f"⏳ {lab}\n{why}. Поставил на автозапись: запишу, как только станет возможно."
-        return f"Статус занятия «{it['status']}», записаться пока нельзя: {lab}"
+        return f"Статус занятия «{it['status']}», записаться пока нельзя\n{lab}"
