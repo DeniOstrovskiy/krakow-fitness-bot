@@ -178,15 +178,15 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _build_list(st):
     """Возвращает (HTML-текст, клавиатура)."""
-    head = "Отслеживаю:" if (st["watches"] or st["targets"]) else "Отслеживание пусто. Добавьте через /watch"
+    head = "<b>Отслеживаю:</b>" if (st["watches"] or st["targets"]) else "Отслеживание пусто. Добавьте через /watch"
     blocks = [head]
     blocks += [f"{i}. {booker.rich(describe(w))}" for i, w in enumerate(st["watches"], 1)]
     rows = []
     for i, t in enumerate(st["targets"], len(st["watches"]) + 1):
-        blocks.append(f"{i}. ⏳ {booker.rich_label(t['label'])}\nждёт открытия записи")
+        blocks.append(f"{i}. ⏳ {booker.rich_label(t['label'])}\n(ждёт, когда можно будет записаться)")
         rows.append([InlineKeyboardButton(f"❌ Отменить {i}", callback_data=f"lr:{t['id']}")])
     if st["booked"]:
-        blocks.append("Записан:")
+        blocks.append("<b>Записан:</b>")
         blocks += [f"📅 {booker.rich_label(b['label'])}"
                    for b in sorted(st["booked"], key=lambda b: b["start"])]
         rows.append([InlineKeyboardButton("🔄 Сверить «Записан» с сайтом", callback_data="sync")])
