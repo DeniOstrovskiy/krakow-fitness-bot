@@ -94,6 +94,7 @@ def fetch_club(s: requests.Session, club: str, require_auth: bool = True) -> lis
         if not t or not t.get("datetime"):
             continue
         reg = li.select_one(".registration")
+        dm = re.search(r"(\d+)\s*min", (li.select_one(".infos").get_text(" ", strip=True) if li.select_one(".infos") else ""))
         a = li.select_one("a.activity")
         items.append({
             "id": li["data-id"],
@@ -105,6 +106,7 @@ def fetch_club(s: requests.Session, club: str, require_auth: bool = True) -> lis
             "start": dt.datetime.fromisoformat(t["datetime"]),
             "full": li.get("data-full") == "true",
             "status": reg.get_text(" ", strip=True) if reg else "",
+            "dur": int(dm.group(1)) if dm else None,
         })
     return items
 
@@ -283,7 +285,7 @@ def _tick_locked() -> list[str]:
         last_resp = text or last_resp
         if ok:
             booked_ids.add(it["id"])
-            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat(), "club": it["club"]})
+            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat(), "club": it["club"], "dur": it.get("dur")})
             msgs.append(f"✅ Записан\n{label(it)}")
             tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
             if tgt:
@@ -417,7 +419,7 @@ def _tick_locked() -> list[str]:
 
     def save_all(x):
         x["cookies"] = {**x["cookies"], **s.cookies.get_dict()}
-        x["booked"] = [b for b in x["booked"] + new_booked if b["start"] > now.isoformat()]
+        x["booked"] = [b for b in x["booked"] + new_booked if b["start"] > (now - dt.timedelta(days=30)).isoformat()]  # хвост 30 дней для календаря
         x["targets"] = [t for t in x["targets"] if t["id"] not in booked_ids and t["start"] > now.isoformat()]
         for t in x["targets"]:
             if t["id"] in alerts:
@@ -465,7 +467,7 @@ def book_now(club: str, item_id: str) -> str:
                 if text:
                     x["last_response"] = text
                 if ok:
-                    x["booked"].append({"id": it["id"], "label": lab, "start": it["start"].isoformat(), "club": it["club"]})
+                    x["booked"].append({"id": it["id"], "label": lab, "start": it["start"].isoformat(), "club": it["club"], "dur": it.get("dur")})
                     x["targets"] = [t for t in x["targets"] if t["id"] != it["id"]]
             store.update(save)
             return f"✅ Записан\n{lab}" if ok else f"⚠️ Не удалось записаться\n{lab}\n{msg}"

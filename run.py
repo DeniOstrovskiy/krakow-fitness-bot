@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 import bot as legacy
+import store
 import booking_commands as bc
 from config import ClubSchedule, load_config
 
@@ -62,6 +64,13 @@ async def serve(cfg) -> None:
         app._tick_task = asyncio.create_task(bc.run_tick(app))
         return web.json_response({"started": True})
 
+    async def calendar_feed(request: web.Request) -> web.Response:
+        import cal
+        if not hmac.compare_digest(request.query.get("key", ""), cal.feed_key()):
+            return web.Response(status=403)
+        st = await asyncio.to_thread(store.load)
+        return web.Response(text=cal.build_ics(st.get("booked", [])), content_type="text/calendar", charset="utf-8")
+
     async def health(_: web.Request) -> web.Response:
         return web.Response(text="ok")
 
@@ -74,7 +83,7 @@ async def serve(cfg) -> None:
         allowed_updates=Update.ALL_TYPES,
     )
     web_app = web.Application()
-    web_app.add_routes([web.post(path, telegram_hook), web.get("/tick", tick), web.get("/health", health)])
+    web_app.add_routes([web.post(path, telegram_hook), web.get("/tick", tick), web.get("/health", health), web.get("/calendar.ics", calendar_feed)])
     runner = web.AppRunner(web_app)
     await runner.setup()
     await web.TCPSite(runner, cfg.webhook_listen_host, cfg.webhook_listen_port).start()

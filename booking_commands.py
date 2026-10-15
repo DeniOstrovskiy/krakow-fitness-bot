@@ -185,10 +185,11 @@ def _build_list(st):
     for i, t in enumerate(st["targets"], len(st["watches"]) + 1):
         blocks.append(f"{i}. ⏳ {booker.rich_label(t['label'])}\n(ждёт, когда можно будет записаться)")
         rows.append([InlineKeyboardButton(f"❌ Отменить {i}", callback_data=f"lr:{t['id']}")])
-    if st["booked"]:
+    future = [b for b in st["booked"] if b["start"] > booker.now_local().isoformat()]
+    if future:
         blocks.append("<b>Записан:</b>")
         blocks += [f"📅 {booker.rich_label(b['label'])}"
-                   for b in sorted(st["booked"], key=lambda b: b["start"])]
+                   for b in sorted(future, key=lambda b: b["start"])]
         rows.append([InlineKeyboardButton("🔄 Сверить «Записан» с сайтом", callback_data="sync")])
     if st["paused"]:
         blocks.append("⏸ Бот на паузе")
@@ -197,8 +198,18 @@ def _build_list(st):
 
 @owner_only
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    notes = []
+    st0 = await asyncio.to_thread(store.load)
+    if st0["booked"]:  # каждый раз сверяем «Записан» с сайтом; при сбое просто показываем список как есть
+        try:
+            rep = await asyncio.wait_for(asyncio.to_thread(_sync_booked), 30)
+            notes = [html.escape(l) for l in rep.splitlines() if l.startswith("✖")]
+        except Exception:  # noqa: BLE001
+            pass
     st = await asyncio.to_thread(store.load)
     text, markup = _build_list(st)
+    if notes:
+        text = "\n".join(notes) + "\n\n" + text
     await update.effective_message.reply_text(text, reply_markup=markup, parse_mode="HTML")
 
 
@@ -234,6 +245,7 @@ def _sync_booked() -> str:
     s = booker.make_session(st["cookies"])
     cache: dict[str, dict] = {}
     removed, kept, unknown = [], 0, []
+    durs: dict = {}
     for b in todo:
         club = b.get("club") or booker.club_of(b["label"])
         if not club:
@@ -246,11 +258,16 @@ def _sync_booked() -> str:
             unknown.append(booker.flat(b["label"]))
         elif booker.state_of(it) == "booked":
             kept += 1
+            if it.get("dur") and not b.get("dur"):
+                durs[b["id"]] = it["dur"]
         else:
             removed.append(b)
-    if removed:
+    if removed or durs:
         ids = {b["id"] for b in removed}
-        store.update(lambda x: x.update(booked=[b for b in x["booked"] if b["id"] not in ids]))
+
+        def apply(x):
+            x["booked"] = [dict(b, dur=durs.get(b["id"], b.get("dur"))) for b in x["booked"] if b["id"] not in ids]
+        store.update(apply)
     out = [f"Сверка с сайтом: подтверждено {kept}, снято {len(removed)}."]
     out += [f"✖ Снято (на сайте не записан): {booker.flat(b['label'])}" for b in removed]
     out += [f"? Не нашёл на сайте: {l}" for l in unknown]
@@ -284,6 +301,24 @@ async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:  # noqa: BLE001
         text = f"Не удалось сверить: {e!r}"
     await update.effective_message.reply_text(text)
+
+
+@owner_only
+async def calendar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    import cal
+    base = (os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+    if not base:
+        await update.effective_message.reply_text("Адрес сервиса не задан (WEBHOOK_URL / RENDER_EXTERNAL_URL).")
+        return
+    url = f"{base}/calendar.ics?key={cal.feed_key()}"
+    await update.effective_message.reply_text(
+        "Календарь с вашими записями (обновляется сам, события появляются с задержкой от минут до нескольких часов).\n\n"
+        f"Ссылка:\n{url}\n\n"
+        "iPhone: Настройки → Календарь → Учётные записи → Добавить → Другое → Подписной календарь → вставьте ссылку.\n"
+        "Google: calendar.google.com в браузере → «Другие календари» (+) → «По URL» → вставьте ссылку "
+        "(в приложении Google Calendar этого пункта нет, но после добавления календарь появится и там).\n\n"
+        "Ссылку не публикуйте: по ней видны все ваши записи.",
+        disable_web_page_preview=True)
 
 
 @owner_only
@@ -520,6 +555,7 @@ def register(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(list_remove_callback, pattern=r"^lr:"))
     app.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync$"))
     app.add_handler(CommandHandler("sync", sync_cmd))
+    app.add_handler(CommandHandler("calendar", calendar_cmd))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
 
 
