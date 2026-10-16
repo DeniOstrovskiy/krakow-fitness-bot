@@ -20,7 +20,7 @@ DAY_MAP = {**{n: i for i, n in enumerate(DAY_NAMES)},
            **{n: i for i, n in enumerate(["mon", "tue", "wed", "thu", "fri", "sat", "sun"])}}
 FAVORITES = [c.strip() for c in os.getenv(
     "FAVORITE_CLUBS",
-    "krakow-galeria-kazimierz,krakow-high5ive,krakow-kapelanka,krakow-garden-residence,krakow-przybyszewskiego,krakow-dytmara,krakow-lindego",
+    "krakow-galeria-kazimierz,krakow-high5ive,krakow-kapelanka,krakow-garden-residence,krakow-przybyszewskiego,krakow-dytmara,krakow-lindego,krakow-jasnogorska",
 ).split(",") if c.strip()]
 
 CLUB_TITLES = booker.CLUB_TITLES

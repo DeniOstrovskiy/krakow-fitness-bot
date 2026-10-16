@@ -16,7 +16,8 @@ from config import load_config
 _SLOT_URL = re.compile(r"/kluby-fitness/([^/]+)/grafik-zajec/(\d+)")
 
 
-def _upcoming(slots, now, tz, days: int = 7):
+def _upcoming(slots, now, tz, days: int | None = None):
+    days = days or int(os.getenv("SEARCH_DAYS", "7"))
     """Занятия от сейчас до now+days (а не календарная неделя)."""
     end = now + timedelta(days=days)
     out = []
@@ -100,10 +101,10 @@ async def _handle_search(
         slots = _upcoming(schedule.slots, now, tz)
         if mode == "trainer":
             slots = filter_slots_by_trainer(slots, query)
-            title = f"{club.name}: тренер {query} (ближайшие 7 дней)"
+            title = f"{club.name}: тренер {query} (ближайшие {os.getenv('SEARCH_DAYS', '7')} дн.)"
         else:
             slots = filter_slots_by_name(slots, query)
-            title = f"{club.name}: {query} (ближайшие 7 дней)"
+            title = f"{club.name}: {query} (ближайшие {os.getenv('SEARCH_DAYS', '7')} дн.)"
         slots.sort(key=lambda s: s.start)
 
         lines.append(title)

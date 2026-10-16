@@ -93,6 +93,9 @@ async def serve(cfg) -> None:
 
 def main() -> None:
     cfg = load_config()
+    # старый адрес myfitnessplace.pl -> zdrofit.pl (расписание и запись идут через zdrofit.pl)
+    cfg = dataclasses.replace(cfg, clubs=[
+        dataclasses.replace(c, url=c.url.replace("//myfitnessplace.pl", "//zdrofit.pl")) for c in cfg.clubs])
     # Клубы из SCHEDULE_URLS остаются как есть; из FAVORITE_CLUBS добавляются только недостающие.
     have = []
     for c in cfg.clubs:
