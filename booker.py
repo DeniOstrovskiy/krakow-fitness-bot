@@ -148,6 +148,7 @@ CLUB_TITLES = {
     "krakow-dytmara": "Dytmara",
     "krakow-lindego": "Lindego 1c",
     "krakow-jasnogorska": "Jasnogórska 62",
+    "krakow-galicyjska": "Atut Galicyjska 18",
 }
 _DOW_EN = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
 _OLD_LABEL = re.compile(r"^(?P<name>.*?) (?P<d>" + _DOW_EN + r") (?P<dm>\d\d\.\d\d) (?P<t>\d\d:\d\d), "
