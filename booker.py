@@ -27,11 +27,14 @@ HORIZON_DAYS = int(os.getenv("MAX_DAYS_AHEAD", "14"))
 OPEN_BEFORE_HOURS = float(os.getenv("OPEN_BEFORE_HOURS", "48"))  # запись открывается за N часов до начала
 BURST_SECONDS = int(os.getenv("BURST_SECONDS", "55"))            # сколько длится частый опрос в «горячем» окне
 BURST_EVERY = float(os.getenv("BURST_EVERY", "1"))               # интервал частого опроса, секунды
-FAST_LEAD = float(os.getenv("FAST_LEAD", "3"))       # быстрая фаза начинается за N с до расчётного открытия
+FAST_LEAD = float(os.getenv("FAST_LEAD", "10"))       # быстрая фаза начинается за N с до расчётного открытия
 FAST_EVERY = float(os.getenv("FAST_EVERY", "0.25"))  # пауза между пробами формы, секунды
 FAST_SECONDS = float(os.getenv("FAST_SECONDS", "20"))  # сколько длится быстрая фаза
 FAST_POSTS = int(os.getenv("FAST_POSTS", "30"))      # максимум отправок формы на занятие за фазу
+FAST_PARALLEL = int(os.getenv("FAST_PARALLEL", "2"))  # параллельных потоков на одно занятие в быстрой фазе
 FAST_AFTER = float(os.getenv("FAST_AFTER", "30"))      # быстрая фаза работает до N с после расчётного открытия (дальше только обычный опрос)
+DOWN_ALERT_SECONDS = int(os.getenv("DOWN_ALERT_SECONDS", "300"))   # писать о недоступности сайта, если сбой дольше N секунд
+DOWN_REPEAT_SECONDS = int(os.getenv("DOWN_REPEAT_SECONDS", "7200"))  # и напоминать не чаще раза в N секунд
 WARM_LEAD = 10     # за столько секунд до открытия делаем «прогревающий» запрос
 HOT_LEAD = 70      # «горячее» окно начинается за 70 с до расчётного открытия
 HOT_TAIL = 600     # и длится 10 минут после (если сайт открывает с задержкой)
@@ -216,26 +219,30 @@ def club_of(lab: str):
     return None
 
 
-def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str, str]:
-    """Возвращает (успех, сообщение, текст ответа сервера для отладки)."""
-    url = BASE + it["url"]
-    xhr = {"X-Requested-With": "XMLHttpRequest",
-           "Referer": f"{BASE}/kluby-fitness/{it['club']}/grafik-zajec"}
-    r = s.get(url, headers=xhr, timeout=20)
+def _xhr(it: dict) -> dict:
+    return {"X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{BASE}/kluby-fitness/{it['club']}/grafik-zajec"}
+
+
+def get_form(s: requests.Session, it: dict):
+    """GET страницы формы занятия. Возвращает данные формы (dict) или None, если формы нет."""
+    r = s.get(BASE + it["url"], headers=_xhr(it), timeout=20)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    form = soup.find("form", {"name": "schedule_register_form"})
+    form = BeautifulSoup(r.text, "html.parser").find("form", {"name": "schedule_register_form"})
     if not form:
         if _logged_out(r.text):
             raise AuthError("session expired")
-        if quiet:  # пробная попытка в момент открытия: формы ещё нет, это не ошибка
-            return False, None, ""
-        return False, "форма записи не найдена (возможно, уже записаны)", ""
+        return None
     data = {i["name"]: i.get("value", "") for i in form.find_all("input") if i.get("name")}
     btn = form.find("button", {"type": "submit"})
     if btn and btn.get("name"):
         data[btn["name"]] = btn.get("value", "")
-    r2 = s.post(url, data=data, headers=xhr, timeout=20)
+    return data
+
+
+def post_form(s: requests.Session, it: dict, data: dict, quiet: bool = False) -> tuple[bool, str, str]:
+    """Отправляет форму. Возвращает (успех, сообщение, текст ответа сервера)."""
+    r2 = s.post(BASE + it["url"], data=data, headers=_xhr(it), timeout=20)
     if _logged_out(r2.text):
         raise AuthError("session expired")
     s2 = BeautifulSoup(r2.text, "html.parser")
@@ -250,6 +257,16 @@ def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str,
         return False, None, text  # форму приняли, но запись ещё не открыта: пробуем дальше
     ok = new == "booked" or (not still_form and new not in ("open", "early"))
     return ok, ("подтверждено" if new == "booked" else text[:200]), text
+
+
+def book(s: requests.Session, it: dict, quiet: bool = False) -> tuple[bool, str, str]:
+    """Возвращает (успех, сообщение, текст ответа сервера для отладки)."""
+    data = get_form(s, it)
+    if data is None:
+        if quiet:  # пробная попытка в момент открытия: формы ещё нет, это не ошибка
+            return False, None, ""
+        return False, "форма записи не найдена (возможно, уже записаны)", ""
+    return post_form(s, it, data, quiet)
 
 
 def tick() -> list[str]:
@@ -277,7 +294,24 @@ def _tick_locked() -> list[str]:
     next_hot = 0.0
     seen_early: set[str] = set()
     alerts: dict[str, str] = {}
+    failed = False
     clubs = all_clubs
+    rec_lock = threading.Lock()
+
+    def record_ok(it: dict) -> bool:
+        """Фиксирует успешную запись (потокобезопасно). False, если уже зафиксирована другим потоком."""
+        with rec_lock:
+            if it["id"] in booked_ids:
+                return False
+            booked_ids.add(it["id"])
+            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat(), "club": it["club"], "dur": it.get("dur")})
+            msgs.append(f"✅ Записан\n{label(it)}")
+            tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
+            if tgt:
+                CARD_UPDATES.append({"chat_id": tgt["chat_id"], "message_id": tgt["message_id"],
+                                     "html": tgt.get("card_html", "")})
+            return True
+
     def attempt(it: dict, quiet: bool = False, final: bool = True):
         """True — записали, False — отказ сайта, None — формы ещё нет (только quiet)."""
         nonlocal last_resp
@@ -286,13 +320,7 @@ def _tick_locked() -> list[str]:
             return None
         last_resp = text or last_resp
         if ok:
-            booked_ids.add(it["id"])
-            new_booked.append({"id": it["id"], "label": label(it), "start": it["start"].isoformat(), "club": it["club"], "dur": it.get("dur")})
-            msgs.append(f"✅ Записан\n{label(it)}")
-            tgt = next((t for t in st["targets"] if t["id"] == it["id"] and t.get("message_id")), None)
-            if tgt:
-                CARD_UPDATES.append({"chat_id": tgt["chat_id"], "message_id": tgt["message_id"],
-                                     "html": tgt.get("card_html", "")})
+            record_ok(it)
         elif final:
             msgs.append(f"⚠️ Не удалось записаться\n{label(it)}\n{msg}")
         return ok
@@ -310,27 +338,67 @@ def _tick_locked() -> list[str]:
             pass
 
     def fast_phase(due: list) -> None:
-        """Быстрая фаза: опрашиваем страницу формы каждые FAST_EVERY с и отправляем запись, как только форма появилась."""
+        """Быстрая фаза: несколько параллельных потоков опрашивают страницу формы и отправляют запись,
+        как только форма появилась. Если не сработает, ниже продолжается обычный опрос расписания."""
+        nonlocal last_resp
         t_end = time.time() + FAST_SECONDS
-        pending = {it["id"]: it for it in due}
-        posts: dict[str, int] = {}
-        while pending and time.time() < t_end:
-            for iid, it in list(pending.items()):
+        cookies = {**st["cookies"], **s.cookies.get_dict()}
+        state = {it["id"]: {"done": threading.Event(), "posts": 0, "lock": threading.Lock()} for it in due}
+        stop = threading.Event()
+        auth_err: list = []
+        sessions: list = []
+
+        def worker(it: dict, idx: int) -> None:
+            nonlocal last_resp
+            stt_ = state[it["id"]]
+            ws = make_session(cookies)
+            sessions.append(ws)
+            time.sleep(idx * FAST_EVERY / max(1, FAST_PARALLEL))  # потоки стартуют вразнобой
+            while time.time() < t_end and not stop.is_set() and not stt_["done"].is_set() and not auth_err:
                 try:
-                    res = attempt(it, quiet=True, final=False)
-                except AuthError:
-                    raise
-                except Exception:  # noqa: BLE001 — сеть: пробуем дальше, запасной путь подхватит
-                    res = None
-                if res is True:
-                    pending.pop(iid)
-                elif res is False:
-                    posts[iid] = posts.get(iid, 0) + 1
-                    if posts[iid] >= FAST_POSTS:
-                        msgs.append(f"⚠️ Не удалось записаться\n{label(it)}\n{(last_resp or '')[:200]}")
-                        pending.pop(iid)
-            if pending:
+                    data = get_form(ws, it)
+                except AuthError as e:
+                    auth_err.append(e)
+                    return
+                except Exception:  # noqa: BLE001 — сеть: пробуем дальше
+                    data = None
+                if data is not None:
+                    with stt_["lock"]:
+                        if stt_["done"].is_set() or stt_["posts"] >= FAST_POSTS or stop.is_set():
+                            return
+                        try:
+                            ok, msg, text = post_form(ws, it, data, quiet=True)
+                        except AuthError as e:
+                            auth_err.append(e)
+                            return
+                        except Exception:  # noqa: BLE001
+                            ok, msg, text = False, None, ""
+                        if text:
+                            last_resp = text
+                        if ok:
+                            record_ok(it)
+                            stt_["done"].set()
+                            return
+                        if msg is not None:  # сайт принял форму и отказал (мест нет и т.п.)
+                            stt_["posts"] += 1
                 time.sleep(FAST_EVERY)
+
+        threads = [threading.Thread(target=worker, args=(it, k), daemon=True)
+                   for it in due for k in range(max(1, FAST_PARALLEL))]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(max(0.1, t_end + 8 - time.time()))
+        stop.set()
+        for ws in sessions:  # обновлённые cookie сессии возвращаем в основную сессию
+            for k, v in ws.cookies.get_dict().items():
+                s.cookies.set(k, v)
+        if auth_err:
+            raise auth_err[0]
+        for it in due:
+            stt_ = state[it["id"]]
+            if not stt_["done"].is_set() and stt_["posts"] >= FAST_POSTS:
+                msgs.append(f"⚠️ Не удалось записаться\n{label(it)}\n{(last_resp or '')[:200]}")
 
     try:
         while True:
@@ -407,15 +475,37 @@ def _tick_locked() -> list[str]:
         if store.update(mark):
             msgs.append("🔑 Сессия истекла. Войдите на zdrofit.pl в браузере и пришлите новый cookie командой /cookie")
         return msgs
-    except Exception as e:  # сеть и т.п. — не падаем, но не спамим чаще раза в 30 минут
-        def mark_err(x):
-            if time.time() - x.get("err_alert", 0) > 1800:
-                x["err_alert"] = time.time()
-                return True
-            return False
+    except Exception as e:  # сайт/сеть: не падаем; пишем только если сбой длится дольше DOWN_ALERT_SECONDS
+        failed = True
 
-        if store.update(mark_err):
-            msgs.append(f"⚠️ Ошибка проверки расписания: {e!r}")
+        def mark_err(x):
+            t = time.time()
+            if not x.get("err_since"):
+                x["err_since"] = t
+            down = t - x["err_since"]
+            if down < DOWN_ALERT_SECONDS:
+                return None
+            first = not x.get("down_alerted")
+            if first or t - x.get("err_alert", 0) > DOWN_REPEAT_SECONDS:
+                x["down_alerted"] = True
+                x["err_alert"] = t
+                return int(down // 60)
+            return None
+
+        mins = store.update(mark_err)
+        if mins is not None:
+            msgs.append(f"⚠️ Сайт zdrofit.pl не отвечает уже {mins} мин. Последняя ошибка: {e!r}"[:400]
+                        + "\nБот продолжает пробовать, очередь автозаписи сохранена.")
+
+    if not failed:
+        def mark_ok(x):
+            was = bool(x.get("down_alerted"))
+            x["err_since"] = 0
+            x["down_alerted"] = False
+            return was
+
+        if store.update(mark_ok):
+            msgs.append("✅ Сайт zdrofit.pl снова отвечает, проверка расписания идёт в обычном режиме.")
 
     now = now_local()
 
