@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from zoneinfo import ZoneInfo
 
 import requests
@@ -17,6 +18,7 @@ import requests
 import waf
 from bs4 import BeautifulSoup
 
+import pg
 import store
 
 BASE = "https://zdrofit.pl"
@@ -166,7 +168,7 @@ def club_title(slug: str) -> str:
 
 def _person(s: str) -> str:
     s = (s or "").replace("_", " ").strip()
-    return s.title() if s and s == s.lower() else s
+    return s.title() if s and (s == s.lower() or s == s.upper()) else s
 
 
 def label(it: dict) -> str:
@@ -307,13 +309,330 @@ def _keepalive(st: dict) -> list[str]:
     return []
 
 
+def _daily_alert(key: str, text: str):
+    """Сообщение не чаще раза в сутки по ключу key. Возвращает текст или None."""
+    today = now_local().strftime("%Y-%m-%d")
+
+    def mark(x):
+        if x.get(key) != today:
+            x[key] = today
+            return True
+        return False
+    return text if store.update(mark) else None
+
+
+def _note_down(e, what: str):
+    """Учитывает сбой источника; сообщение возвращается, только если сбой длится дольше DOWN_ALERT_SECONDS."""
+    def mark_err(x):
+        t = time.time()
+        if not x.get("err_since"):
+            x["err_since"] = t
+        down = t - x["err_since"]
+        if down < DOWN_ALERT_SECONDS:
+            return None
+        first = not x.get("down_alerted")
+        if first or t - x.get("err_alert", 0) > DOWN_REPEAT_SECONDS:
+            x["down_alerted"] = True
+            x["err_alert"] = t
+            return int(down // 60)
+        return None
+
+    mins = store.update(mark_err)
+    if mins is None:
+        return None
+    return (f"⚠️ {what} не отвечает уже {mins} мин. Последняя ошибка: {e!r}"[:400]
+            + "\nБот продолжает пробовать, очередь автозаписи сохранена.")
+
+
+def _note_up(what: str):
+    def mark_ok(x):
+        was = bool(x.get("down_alerted"))
+        x["err_since"] = 0
+        x["down_alerted"] = False
+        return was
+    return f"✅ {what} снова отвечает, проверка расписания идёт в обычном режиме." if store.update(mark_ok) else None
+
+
+def matches_pg(it: dict, w: dict) -> bool:
+    """Как matches(), но название занятия сравнивается в нормализованном виде (слаг сайта и название API)."""
+    if pg.norm(w["activity"]) != it["activity"]:
+        return False
+    return matches(dict(it, activity=w["activity"]), w)
+
+
+def _fetch_pg(ids: dict, clubs: list[str], dates: dict | None = None) -> list[dict]:
+    """Расписание клубов через API (параллельно). dates: {клуб: {даты}} — только эти недели (горячий опрос)."""
+    today = dt.datetime.now(TZ).date()
+    jobs = []
+    for c in clubs:
+        ds = (dates or {}).get(c) or [today + dt.timedelta(days=7 * k) for k in range(HORIZON_DAYS // 7 + 1)]
+        jobs += [(c, d) for d in ds]
+    out: list[dict] = []
+    seen: set = set()
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for (c, _), (items, _n, _f) in zip(jobs, ex.map(lambda j: pg.weekly(ids[j[0]], j[1]), jobs)):
+            for raw in items:
+                if raw["Id"] not in seen:
+                    seen.add(raw["Id"])
+                    out.append(pg.to_item(c, raw))
+    return out
+
+
+def _tick_pg(st: dict):
+    """Тик через API PerfectGym. Возвращает (обработано, сообщения); обработано=False — идти старым путём (сайт + cookie)."""
+    msgs: list[str] = []
+    legacy_ok = bool(st["cookies"])
+    note = "\nРаботаю через cookie." if legacy_ok else ""
+    try:
+        pg.login()
+    except pg.PGAuthError as e:
+        m = _daily_alert("pg_alert", f"🔑 Вход в PerfectGym не удался: {e}. Проверьте PG_LOGIN и PG_PASSWORD в Render.{note}")
+        return (not legacy_ok), ([m] if m else [])
+    except Exception as e:  # noqa: BLE001 — сеть
+        m = _note_down(e, "API PerfectGym")
+        return (not legacy_ok), ([m] if m else [])
+
+    watches, targets = st["watches"], st["targets"]
+    clubs = sorted({w["club"] for w in watches} | {t["club"] for t in targets})
+    try:
+        ids = {c: pg.club_id(c) for c in clubs}
+    except Exception as e:  # noqa: BLE001
+        m = _note_down(e, "API PerfectGym")
+        return (not legacy_ok), ([m] if m else [])
+    missing = [c for c in clubs if not ids[c]]
+    if missing:
+        m = _daily_alert("pg_alert2", "⚠️ Не нашёл в PerfectGym клуб(ы): " + ", ".join(club_title(c) for c in missing)
+                         + ". Задайте PG_CLUB_IDS в Render, например krakow-dytmara=299 (список: /pgtest)." + note)
+        if legacy_ok:
+            return False, ([m] if m else [])
+        msgs += [m] if m else []
+    work = [c for c in clubs if ids[c]]
+    if not work:
+        return True, msgs
+
+    started = time.time()
+    booked_ids = {b["id"] for b in st["booked"]}
+    booked_pg = {b.get("pg_id") for b in st["booked"] if b.get("pg_id")}
+    new_booked: list[dict] = []
+    alerts: dict = {}
+    pg_of: dict = {}          # id цели на сайте -> id занятия в PerfectGym
+    fails = dict(st.get("pg_fail") or {})   # pg_id (строкой) -> текст последней ошибки, чтобы не сообщать повторно
+    fails_now: dict = {}
+    next_hot = 0.0
+    seen_early: set = set()
+    observed = None
+    last_resp = None
+    failed = False
+    rec_lock = threading.Lock()
+
+    def target_of(it):
+        return next((t for t in targets if pg.same_class(t, it)), None)
+
+    def record(it, t) -> bool:
+        with rec_lock:
+            if it["pg_id"] in booked_pg:
+                return False
+            booked_pg.add(it["pg_id"])
+            site_id = t["id"] if t else it["id"]
+            booked_ids.add(site_id)
+            lab = t["label"] if t and t.get("label") else label(it)
+            new_booked.append({"id": site_id, "pg_id": it["pg_id"], "label": lab, "start": it["start"].isoformat(),
+                               "club": it["club"], "dur": it.get("dur")})
+            msgs.append(f"✅ Записан\n{lab}")
+            if t and t.get("message_id"):
+                CARD_UPDATES.append({"chat_id": t["chat_id"], "message_id": t["message_id"], "html": t.get("card_html", "")})
+            return True
+
+    def refuse(it, msg):
+        key = str(it["pg_id"])
+        fails_now[key] = msg
+        if fails.get(key) != msg:
+            msgs.append(f"⚠️ Не удалось записаться\n{label(it)}\n{msg}")
+
+    def attempt(it, t) -> bool:
+        nonlocal last_resp
+        ok, msg, raw = pg.book(it["pg_id"], it["pg_club"])
+        last_resp = raw
+        if ok:
+            record(it, t)
+            fails.pop(str(it["pg_id"]), None)
+        else:
+            refuse(it, msg)
+        return ok
+
+    def fast_phase(due: list) -> None:
+        """Быстрая фаза: потоки опрашивают детали занятия и записывают, как только статус стал «Bookable»."""
+        nonlocal last_resp
+        t_end = time.time() + FAST_SECONDS
+        state = {it["pg_id"]: {"done": threading.Event(), "posts": 0, "lock": threading.Lock(), "msg": ""} for it, _ in due}
+        auth_err: list = []
+
+        def worker(it, t, idx):
+            nonlocal last_resp
+            ss = state[it["pg_id"]]
+            time.sleep(idx * FAST_EVERY / max(1, FAST_PARALLEL))
+            while time.time() < t_end and not ss["done"].is_set() and not auth_err:
+                try:
+                    status = pg.details(it["pg_id"]).get("Status")
+                except Exception:  # noqa: BLE001 — сеть: пробуем дальше
+                    status = None
+                if status in ("FullBooked", "Awaitable"):
+                    return  # мест нет: дальше разберётся обычный опрос
+                if status and pg.state_of(status, None) == "booked":
+                    ss["done"].set()
+                    return
+                if status == "Bookable":
+                    with ss["lock"]:
+                        if ss["done"].is_set() or ss["posts"] >= FAST_POSTS:
+                            return
+                        try:
+                            ok, msg, raw = pg.book(it["pg_id"], it["pg_club"])
+                        except pg.PGAuthError as e:
+                            auth_err.append(e)
+                            return
+                        except Exception as e:  # noqa: BLE001
+                            ok, msg, raw = False, None, ""
+                        if raw:
+                            last_resp = raw
+                        if ok:
+                            record(it, t)
+                            ss["done"].set()
+                            return
+                        if msg is not None:
+                            ss["posts"] += 1
+                            ss["msg"] = msg
+                time.sleep(FAST_EVERY)
+
+        threads = [threading.Thread(target=worker, args=(it, t, k), daemon=True)
+                   for it, t in due for k in range(max(1, FAST_PARALLEL))]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(max(0.1, t_end + 8 - time.time()))
+        if auth_err:
+            raise auth_err[0]
+        for it, _ in due:
+            ss = state[it["pg_id"]]
+            if not ss["done"].is_set() and ss["posts"] >= FAST_POSTS:
+                refuse(it, ss["msg"] or "сервер отклонил запись")
+
+    try:
+        clubs_now = work
+        only_dates = None
+        while True:
+            now = now_local()
+            horizon = now + dt.timedelta(days=HORIZON_DAYS)
+            items = _fetch_pg(ids, clubs_now, only_dates)
+            hot: dict = {}
+            wait_hot = None
+            fast_due: list = []
+            for it in items:
+                if not (now < it["start"] <= horizon) or it["pg_id"] in booked_pg:
+                    continue
+                t = target_of(it)
+                if not (t or any(matches_pg(it, w) for w in watches)):
+                    continue
+                if t:
+                    pg_of[t["id"]] = it["pg_id"]
+                stt = it["state"]
+                if stt == "booked":
+                    continue
+                if stt == "early":
+                    seen_early.add(it["pg_id"])
+                    secs = (it["start"] - dt.timedelta(hours=OPEN_BEFORE_HOURS) - now).total_seconds()
+                    if -HOT_TAIL <= secs <= HOT_LEAD:
+                        hot.setdefault(it["club"], set()).add(it["start"].date())
+                        if -FAST_AFTER <= secs <= FAST_LEAD:
+                            fast_due.append((it, t))
+                    elif secs > HOT_LEAD:
+                        w = secs - HOT_LEAD
+                        wait_hot = w if wait_hot is None else min(wait_hot, w)
+                    continue
+                if stt != "open":
+                    if t:
+                        if stt == "full":
+                            reason = "Запись открылась, но мест уже нет (скорее всего, заняли в первые секунды). Продолжу следить: если кто-то отпишется, запишу."
+                        elif stt == "waitlist":
+                            reason = "Мест нет, есть лист ожидания. Продолжу следить: если место освободится, запишу."
+                        elif stt == "closed":
+                            reason = "Запись уже закрыта."
+                        else:
+                            reason = f"Статус «{it['status']} / {it['reason']}», бот не умеет с ним работать."
+                        if t.get("alerted") != reason and t["id"] not in alerts:
+                            alerts[t["id"]] = reason
+                            msgs.append(f"⚠️ Не записал\n{label(it)}\n{reason}")
+                    continue
+                if it["pg_id"] in seen_early and observed is None:
+                    observed = {"label": label(it), "hours_before": round((it["start"] - now).total_seconds() / 3600, 2),
+                                "at": now.isoformat(timespec="seconds")}
+                attempt(it, t)
+            if fast_due:
+                fast_phase(fast_due)
+            if wait_hot is not None:
+                next_hot = time.time() + wait_hot
+            if hot and time.time() - started < BURST_SECONDS:
+                clubs_now = sorted(hot)
+                only_dates = {c: sorted(ds) for c, ds in hot.items()}
+                time.sleep(BURST_EVERY)
+                continue
+            break
+    except pg.PGAuthError as e:
+        m = _daily_alert("pg_alert", f"🔑 PerfectGym отклонил вход: {e}. Проверьте PG_LOGIN и PG_PASSWORD в Render.")
+        if m:
+            msgs.append(m)
+    except Exception as e:  # noqa: BLE001
+        failed = True
+        m = _note_down(e, "API PerfectGym")
+        if m:
+            msgs.append(m)
+    if not failed:
+        m = _note_up("API PerfectGym")
+        if m:
+            msgs.append(m)
+
+    now = now_local()
+
+    def save_all(x):
+        x["booked"] = [b for b in x["booked"] + new_booked if b["start"] > (now - dt.timedelta(days=30)).isoformat()]
+        x["targets"] = [t for t in x["targets"] if t["id"] not in booked_ids and t["start"] > now.isoformat()]
+        for t in x["targets"]:
+            if t["id"] in alerts:
+                t["alerted"] = alerts[t["id"]]
+            if t["id"] in pg_of:
+                t["pg_id"] = pg_of[t["id"]]
+        x["pg_fail"] = {k: v for k, v in {**fails, **fails_now}.items() if k in fails_now}
+        x["next_hot"] = next_hot
+        if observed:
+            x["open_observed"] = observed
+        if last_resp:
+            x["last_response"] = last_resp
+    store.update(save_all)
+    return True, msgs
+
+
 def _tick_locked() -> list[str]:
     msgs: list[str] = []
     st = store.load()
+    idle = st["paused"] or not (st["watches"] or st["targets"])
+    if idle:
+        return _keepalive(st) if st["cookies"] else msgs  # очередь пуста: поддерживаем сессию (если есть cookie)
+    if time.time() - st.get("last_tick", 0) < 20:  # защита от двойных пингов
+        return msgs
+    if pg.enabled():
+        prev = st.get("last_tick", 0)
+        store.update(lambda x: x.update(last_tick=time.time()))
+        handled, pmsgs = _tick_pg(st)
+        if handled:
+            return pmsgs
+        store.update(lambda x: x.update(last_tick=prev))  # старый путь имеет собственную защиту от двойного вызова
+        msgs += pmsgs
     if not st["cookies"]:
         return msgs
-    if st["paused"] or not (st["watches"] or st["targets"]):
-        return _keepalive(st)  # очередь пуста: просто поддерживаем сессию
+    return msgs + _tick_legacy(st)
+
+
+def _tick_legacy(st: dict) -> list[str]:
+    msgs: list[str] = []
     if time.time() - st.get("last_tick", 0) < 20:  # защита от двойных пингов
         return msgs
     store.update(lambda x: x.update(last_tick=time.time()))
@@ -559,15 +878,60 @@ def _tick_locked() -> list[str]:
     store.update(save_all)
     return msgs
 
+def _book_now_pg(st: dict, it: dict, club: str, lab: str):
+    """Кнопка «Записаться» через API PerfectGym. None — API не смог, нужно идти через сайт (если есть cookie)."""
+    fallback = bool(st["cookies"])
+    try:
+        pg.login()
+        c = pg.find_class(club, it["start"], it["name"])
+    except pg.PGAuthError as e:
+        return None if fallback else f"🔑 Вход в PerfectGym не удался: {e}"
+    except Exception as e:  # noqa: BLE001
+        return None if fallback else f"⚠️ PerfectGym не отвечает: {e!r}"
+    if c is None:
+        return None if fallback else f"⚠️ Не нашёл это занятие в расписании PerfectGym.\n{lab}"
+    if c["state"] == "booked" or c["pg_id"] in {b.get("pg_id") for b in st["booked"]}:
+        return f"Вы уже записаны\n{lab}"
+    if c["state"] == "closed":
+        return f"⛔ Запись закрыта\n{lab}"
+    if c["state"] == "open":
+        try:
+            ok, msg, raw = pg.book(c["pg_id"], c["pg_club"])
+        except pg.PGAuthError as e:
+            return None if fallback else f"🔑 Вход в PerfectGym не удался: {e}"
+        except Exception as e:  # noqa: BLE001
+            return f"⚠️ Ошибка записи: {e!r}"
+
+        def save(x):
+            x["last_response"] = raw
+            if ok:
+                x["booked"].append({"id": it["id"], "pg_id": c["pg_id"], "label": lab, "start": it["start"].isoformat(),
+                                    "club": it["club"], "dur": c.get("dur") or it.get("dur")})
+                x["targets"] = [t for t in x["targets"] if t["id"] != it["id"]]
+        store.update(save)
+        return f"✅ Записан\n{lab}" if ok else f"⚠️ Не удалось записаться\n{lab}\n{msg}"
+    if c["state"] in ("early", "full", "waitlist"):
+        def queue(x):
+            if not any(t["id"] == it["id"] for t in x["targets"]):
+                x["targets"].append({"id": it["id"], "club": club, "label": lab, "start": it["start"].isoformat(),
+                                     "pg_id": c["pg_id"]})
+        store.update(queue)
+        why = ("запись ещё не открыта (обычно открывается за ~48 ч до начала)" if c["state"] == "early"
+               else "мест нет" + (", есть лист ожидания" if c["state"] == "waitlist" else ""))
+        return f"⏳ {lab}\n{why}. Поставил на автозапись: запишу, как только станет возможно."
+    return f"Статус занятия «{c['status']} / {c['reason']}», записаться пока нельзя\n{lab}"
+
+
 def book_now(club: str, item_id: str) -> str:
     """Кнопка «Записаться»: записывает сразу, либо ставит занятие в очередь автозаписи."""
     with LOCK:
         st = store.load()
-        if not st["cookies"]:
+        use_pg = pg.enabled()
+        if not st["cookies"] and not use_pg:
             return "Нет сессии. Пришлите cookie командой /cookie (подсказка: /booking)."
         s = make_session(st["cookies"])
         try:
-            items = fetch_club(s, club)
+            items = fetch_club(s, club, require_auth=not use_pg)
         except AuthError:
             return "🔑 Сессия истекла. Пришлите новый cookie командой /cookie"
         except Exception as e:
@@ -581,6 +945,12 @@ def book_now(club: str, item_id: str) -> str:
             return f"Вы уже записаны\n{lab}"
         if stt == "closed" or it["start"] <= now_local():
             return f"⛔ Запись закрыта\n{lab}"
+        if use_pg:
+            res = _book_now_pg(st, it, club, lab)
+            if res is not None:
+                return res
+            if not st["cookies"]:
+                return f"⚠️ PerfectGym сейчас недоступен, а cookie не заданы.\n{lab}"
         if stt == "open" and not it["full"]:
             try:
                 ok, msg, text = book(s, it)

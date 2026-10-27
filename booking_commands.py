@@ -12,6 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMa
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import booker
+import pg
 import store
 import waf
 
@@ -235,6 +236,43 @@ async def list_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         pass
 
 
+def _sync_booked_pg(todo: list) -> str:
+    """Сверка «Записан» через API PerfectGym: статус занятия смотрим с вашим токеном."""
+    pg.login()
+    removed, kept, unknown, upd = [], 0, [], {}
+    for b in todo:
+        pid = b.get("pg_id")
+        if not pid:  # запись сделана через сайт: ищем это занятие в PerfectGym по клубу, времени и названию
+            club = b.get("club") or booker.club_of(b["label"])
+            lines = booker.norm_label(b["label"]).split("\n")
+            name = lines[2].split(" - ")[0] if len(lines) >= 3 else ""
+            c = pg.find_class(club, dt.datetime.fromisoformat(b["start"]), name) if club and name else None
+            pid = c["pg_id"] if c else None
+            if pid:
+                upd[b["id"]] = {"pg_id": pid, "dur": c.get("dur")}
+        if not pid:
+            unknown.append(booker.flat(b["label"]))
+            continue
+        status = pg.details(pid).get("Status")
+        if pg.state_of(status, None) == "booked":
+            kept += 1
+        elif status == "Bookable":  # занятие снова доступно для записи — значит, вы отписались
+            removed.append(b)
+        else:
+            unknown.append(f"{booker.flat(b['label'])} (статус {status})")
+    if removed or upd:
+        ids = {b["id"] for b in removed}
+
+        def apply(x):
+            x["booked"] = [dict(b, **{k: v for k, v in upd.get(b["id"], {}).items() if v and not b.get(k)})
+                           for b in x["booked"] if b["id"] not in ids]
+        store.update(apply)
+    out = [f"Сверка с PerfectGym: подтверждено {kept}, снято {len(removed)}."]
+    out += [f"✖ Снято (вы не записаны): {booker.flat(b['label'])}" for b in removed]
+    out += [f"? Не уверен: {l}" for l in unknown]
+    return "\n".join(out)
+
+
 def _sync_booked() -> str:
     """Сверяет «Записан» с сайтом: убирает занятия, на которые на сайте вы уже не записаны."""
     st = store.load()
@@ -242,6 +280,14 @@ def _sync_booked() -> str:
     todo = [b for b in st["booked"] if b["start"] > now]
     if not todo:
         return "Сверять нечего."
+    if pg.enabled():
+        try:
+            return _sync_booked_pg(todo)
+        except Exception as e:  # noqa: BLE001
+            if not st["cookies"]:
+                return f"⚠️ Сверка через PerfectGym не удалась: {e!r}"
+    if not st["cookies"]:
+        return "Нет cookie и не задан вход PerfectGym, сверять не с чем."
     s = booker.make_session(st["cookies"])
     cache: dict[str, dict] = {}
     removed, kept, unknown = [], 0, []
@@ -391,7 +437,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chk = await asyncio.to_thread(_check_session, st["cookies"])
         sess = "сайт блокирует запросы с сервера" if chk is None else ("OK" if chk else "истекла")
     last = f"{int(time.time() - st['last_tick'])} с назад" if st["last_tick"] else "ещё не было"
-    text = (f"Сессия: {sess}\nОтслеживаний: {len(st['watches'])}\n"
+    mode = f"PerfectGym API ({pg.mask_login()})" if pg.enabled() else "сайт + cookie"
+    text = (f"Режим записи: {mode}\nСессия (cookie): {sess}\nОтслеживаний: {len(st['watches'])}\n"
             f"Пауза: {'да' if st['paused'] else 'нет'}\nПоследняя проверка: {last}")
     if st.get("next_hot"):
         left = int(st["next_hot"] - time.time())
@@ -548,6 +595,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("cookie", cookie_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("probe", probe_cmd))
+    app.add_handler(CommandHandler("pgtest", pgtest_cmd))
     app.add_handler(CommandHandler("myid", myid_cmd))
     app.add_handler(CommandHandler("booking", help_booking))
     app.add_handler(CallbackQueryHandler(book_callback, pattern=r"^bk:"))
@@ -557,6 +605,67 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("sync", sync_cmd))
     app.add_handler(CommandHandler("calendar", calendar_cmd))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
+
+
+def _pgtest() -> str:
+    """Проверка API PerfectGym без записи: вход, сопоставление клубов, образец расписания."""
+    if not pg.enabled():
+        return "PG_LOGIN и PG_PASSWORD не заданы (Render → Environment). Бот работает через сайт и cookie."
+    out = [f"Логин: {pg.mask_login()}"]
+    try:
+        pg.login(force=True)
+        ti = pg.token_info()
+        out.append(f"✅ Вход выполнен. Токен действует ещё ~{(ti['expires_in'] or 0) // 60} мин, номер пользователя найден ({ti['uid_src']}).")
+    except pg.PGAuthError as e:
+        out.append(f"❌ Вход не удался: {e}")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"⚠️ PerfectGym не отвечает: {e!r}")
+        return "\n".join(out)
+    first = None
+    out.append("\nКлубы:")
+    for c in FAVORITES:
+        try:
+            cands = pg.club_candidates(c)
+            cid = pg.club_id(c)
+        except Exception as e:  # noqa: BLE001
+            out.append(f"⚠️ {booker.club_title(c)}: {e!r}")
+            continue
+        if cid:
+            first = first or (c, cid)
+            name = next((x["FullName"] for x in cands if x["Id"] == cid), "из PG_CLUB_IDS")
+            out.append(f"✅ {booker.club_title(c)} → {cid} ({name})")
+        elif cands:
+            out.append(f"⚠️ {booker.club_title(c)}: несколько вариантов, укажите PG_CLUB_IDS: " + "; ".join(f"{x['Id']} {x['FullName']}" for x in cands))
+        else:
+            out.append(f"❌ {booker.club_title(c)}: не найден")
+    if first:
+        try:
+            raw, _, _ = pg.weekly(first[1], booker.now_local().date())
+            from collections import Counter
+            cnt = Counter(f"{x.get('Status')}" + (f"/{x['StatusReason']}" if x.get("StatusReason") else "") for x in raw)
+            out.append(f"\nРасписание {booker.club_title(first[0])} на неделю: {len(raw)} занятий. Статусы: "
+                       + ", ".join(f"{k} ×{v}" for k, v in cnt.most_common()))
+        except Exception as e:  # noqa: BLE001
+            out.append(f"⚠️ Расписание: {e!r}")
+    st = store.load()
+    mine = [b for b in st["booked"] if b.get("pg_id") and b["start"] > booker.now_local().isoformat()][:3]
+    for b in mine:
+        try:
+            out.append(f"Мой статус «{booker.flat(b['label'])}»: {pg.details(b['pg_id']).get('Status')}")
+        except Exception as e:  # noqa: BLE001
+            out.append(f"⚠️ Детали занятия: {e!r}")
+    out.append("\nЗаписей этой командой не делается.")
+    return "\n".join(out)
+
+
+@owner_only
+async def pgtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text("Проверяю PerfectGym…")
+    try:
+        text = await asyncio.wait_for(asyncio.to_thread(_pgtest), 60)
+    except Exception as e:  # noqa: BLE001
+        text = f"⚠️ Проверка не завершилась: {e!r}"
+    await update.effective_message.reply_text(text[:3900])
 
 
 async def run_tick(app: Application) -> list[str]:
