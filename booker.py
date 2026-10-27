@@ -33,6 +33,7 @@ FAST_SECONDS = float(os.getenv("FAST_SECONDS", "20"))  # сколько длит
 FAST_POSTS = int(os.getenv("FAST_POSTS", "30"))      # максимум отправок формы на занятие за фазу
 FAST_PARALLEL = int(os.getenv("FAST_PARALLEL", "2"))  # параллельных потоков на одно занятие в быстрой фазе
 FAST_AFTER = float(os.getenv("FAST_AFTER", "30"))      # быстрая фаза работает до N с после расчётного открытия (дальше только обычный опрос)
+KEEPALIVE_SECONDS = int(os.getenv("KEEPALIVE_SECONDS", "1200"))  # как часто поддерживать сессию, когда очередь пуста
 DOWN_ALERT_SECONDS = int(os.getenv("DOWN_ALERT_SECONDS", "300"))   # писать о недоступности сайта, если сбой дольше N секунд
 DOWN_REPEAT_SECONDS = int(os.getenv("DOWN_REPEAT_SECONDS", "7200"))  # и напоминать не чаще раза в N секунд
 WARM_LEAD = 10     # за столько секунд до открытия делаем «прогревающий» запрос
@@ -274,11 +275,45 @@ def tick() -> list[str]:
         return _tick_locked()
 
 
+def _auth_alert_msg() -> list[str]:
+    """Сообщение «сессия истекла» — не чаще раза в день."""
+    today = now_local().strftime("%Y-%m-%d")
+
+    def mark(x):
+        if x["auth_alert"] != today:
+            x["auth_alert"] = today
+            return True
+        return False
+
+    if store.update(mark):
+        return ["🔑 Сессия истекла. Войдите на zdrofit.pl в браузере и пришлите новый cookie командой /cookie"]
+    return []
+
+
+def _keepalive(st: dict) -> list[str]:
+    """Раз в KEEPALIVE_SECONDS заходит на сайт с cookie (когда очередь пуста), чтобы сессия не протухала,
+    и сохраняет обновлённые cookie."""
+    if time.time() - st.get("last_keepalive", 0) < KEEPALIVE_SECONDS:
+        return []
+    store.update(lambda x: x.update(last_keepalive=time.time()))
+    s = make_session(st["cookies"])
+    try:
+        r = s.get(BASE + "/moje-konto/profil", timeout=20)
+        if r.status_code == 200 and len(r.text) > 2000 and _logged_out(r.text):
+            return _auth_alert_msg()
+    except Exception:  # noqa: BLE001 — сайт/сеть недоступны: попробуем в следующий раз
+        return []
+    store.update(lambda x: x.update(cookies={**x["cookies"], **s.cookies.get_dict()}))
+    return []
+
+
 def _tick_locked() -> list[str]:
     msgs: list[str] = []
     st = store.load()
-    if st["paused"] or not (st["watches"] or st["targets"]) or not st["cookies"]:
+    if not st["cookies"]:
         return msgs
+    if st["paused"] or not (st["watches"] or st["targets"]):
+        return _keepalive(st)  # очередь пуста: просто поддерживаем сессию
     if time.time() - st.get("last_tick", 0) < 20:  # защита от двойных пингов
         return msgs
     store.update(lambda x: x.update(last_tick=time.time()))
