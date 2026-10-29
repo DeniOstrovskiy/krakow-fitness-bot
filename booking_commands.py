@@ -1,4 +1,4 @@
-"""Telegram-команды для автозаписи: /watch /list /remove /pause /resume /status /cookie /myid."""
+"""Telegram-команды для автозаписи: /watch /list /remove /pause /resume /status /myid."""
 from __future__ import annotations
 
 import asyncio
@@ -14,7 +14,6 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 import booker
 import pg
 import store
-import waf
 
 DAY_NAMES = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 DAY_MAP = {**{n: i for i, n in enumerate(DAY_NAMES)},
@@ -43,8 +42,8 @@ HELP = (
     "/list — что отслеживаю и куда записан\n"
     "/remove N — убрать отслеживание №N\n"
     "/pause, /resume — пауза и возобновление\n"
-    "/status — состояние бота и сессии\n"
-    "/cookie <строка> — обновить сессию сайта (сообщение будет удалено)"
+    "/status — состояние бота\n"
+    "/pgtest — проверка входа и клубов (ничего не записывает)"
 )
 
 
@@ -122,17 +121,6 @@ def resolve_club(q: str):
     return None, f"Клуб не найден. Доступны: {', '.join(FAVORITES)}"
 
 
-def resolve_activity(club: str, q: str):
-    items = booker.fetch_club(booker.make_session({}), club, require_auth=False)
-    slugs = sorted({i["activity"] for i in items})
-    n = _norm(q)
-    exact = [s for s in slugs if _norm(s) == n]
-    hits = exact or [s for s in slugs if n and n in _norm(s)]
-    if len(hits) == 1:
-        return hits[0], None
-    if not hits:
-        return None, "Такого занятия в расписании клуба нет. Есть: " + ", ".join(slugs)
-    return None, "Уточните, их несколько: " + ", ".join(hits)
 
 
 def describe(w: dict) -> str:
@@ -175,6 +163,62 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store.update(lambda st: st["watches"].append(w))
     warn = "\n⚠️ Дни и время не ограничены: бот запишет на ВСЕ такие занятия." if not days and not tm[0] else ""
     await update.effective_message.reply_text(f"Добавлено: {describe(w)}{warn}")
+
+
+def resolve_activity(club: str, q: str):
+    """Название занятия для /watch берём из расписания PerfectGym (текущая и следующая недели)."""
+    cid = pg.club_id(club)
+    if not cid:
+        return None, "Клуб не найден в PerfectGym."
+    today = booker.now_local().date()
+    names: dict[str, str] = {}
+    for k in (0, 7):
+        for c in pg.weekly(cid, today + dt.timedelta(days=k))[0]:
+            if c.get("Name"):
+                names.setdefault(pg.norm(c["Name"]), c["Name"])
+    n = pg.norm(q)
+    exact = [v for k, v in names.items() if k == n]
+    hits = exact or [v for k, v in names.items() if n and n in k]
+    if len(hits) == 1:
+        return hits[0], None
+    if not hits:
+        return None, "Такого занятия в расписании клуба нет. Есть: " + ", ".join(sorted(names.values()))
+    return None, "Уточните, их несколько: " + ", ".join(sorted(hits))
+
+
+def _sync_booked() -> str:
+    """Сверяет «Записан» с PerfectGym: убирает занятия, на которые вы уже не записаны."""
+    st = store.load()
+    now = booker.now_local().isoformat()
+    todo = [b for b in st["booked"] if b["start"] > now]
+    if not todo:
+        return "Сверять нечего."
+    if not pg.enabled():
+        return "Не заданы PG_LOGIN и PG_PASSWORD, сверять не с чем."
+    try:
+        return _sync_booked_pg(todo)
+    except Exception as e:  # noqa: BLE001
+        return f"⚠️ Сверка через PerfectGym не удалась: {e!r}"
+
+
+@owner_only
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = await asyncio.to_thread(store.load)
+    last = f"{int(time.time() - st['last_tick'])} с назад" if st["last_tick"] else "ещё не было"
+    mode = f"PerfectGym API ({pg.mask_login()})" if pg.enabled() else "не задан вход (PG_LOGIN / PG_PASSWORD)"
+    text = (f"Режим записи: {mode}\nОтслеживаний: {len(st['watches'])}\n"
+            f"В очереди на автозапись: {len(st['targets'])}\n"
+            f"Пауза: {'да' if st['paused'] else 'нет'}\nПоследняя проверка: {last}")
+    if st.get("next_hot"):
+        left = int(st["next_hot"] - time.time())
+        if left > 0:
+            text += f"\nЧастый опрос начнётся через {left // 3600} ч {left % 3600 // 60} мин"
+    if st.get("open_observed"):
+        o = st["open_observed"]
+        text += f"\nПоследнее наблюдённое открытие: {booker.flat(o['label'])} за {o['hours_before']} ч до начала"
+    if st["last_response"]:
+        text += f"\n\nОтвет сервера на последнюю запись:\n{st['last_response'][:600]}"
+    await update.effective_message.reply_text(text)
 
 
 def _build_list(st):
@@ -273,51 +317,6 @@ def _sync_booked_pg(todo: list) -> str:
     return "\n".join(out)
 
 
-def _sync_booked() -> str:
-    """Сверяет «Записан» с сайтом: убирает занятия, на которые на сайте вы уже не записаны."""
-    st = store.load()
-    now = booker.now_local().isoformat()
-    todo = [b for b in st["booked"] if b["start"] > now]
-    if not todo:
-        return "Сверять нечего."
-    if pg.enabled():
-        try:
-            return _sync_booked_pg(todo)
-        except Exception as e:  # noqa: BLE001
-            if not st["cookies"]:
-                return f"⚠️ Сверка через PerfectGym не удалась: {e!r}"
-    if not st["cookies"]:
-        return "Нет cookie и не задан вход PerfectGym, сверять не с чем."
-    s = booker.make_session(st["cookies"])
-    cache: dict[str, dict] = {}
-    removed, kept, unknown = [], 0, []
-    durs: dict = {}
-    for b in todo:
-        club = b.get("club") or booker.club_of(b["label"])
-        if not club:
-            unknown.append(booker.flat(b["label"]))
-            continue
-        if club not in cache:
-            cache[club] = {it["id"]: it for it in booker.fetch_club(s, club)}
-        it = cache[club].get(b["id"])
-        if it is None:
-            unknown.append(booker.flat(b["label"]))
-        elif booker.state_of(it) == "booked":
-            kept += 1
-            if it.get("dur") and not b.get("dur"):
-                durs[b["id"]] = it["dur"]
-        else:
-            removed.append(b)
-    if removed or durs:
-        ids = {b["id"] for b in removed}
-
-        def apply(x):
-            x["booked"] = [dict(b, dur=durs.get(b["id"], b.get("dur"))) for b in x["booked"] if b["id"] not in ids]
-        store.update(apply)
-    out = [f"Сверка с сайтом: подтверждено {kept}, снято {len(removed)}."]
-    out += [f"✖ Снято (на сайте не записан): {booker.flat(b['label'])}" for b in removed]
-    out += [f"? Не нашёл на сайте: {l}" for l in unknown]
-    return "\n".join(out)
 
 
 async def sync_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -394,104 +393,16 @@ def _set_paused(value: bool):
     return cmd
 
 
-@owner_only
-async def cookie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    raw = msg.text.partition(" ")[2].strip()
-    try:
-        await msg.delete()  # не оставляем cookie в чате
-    except Exception:
-        pass
-    cookies = booker.parse_cookie_string(raw)
-    if not cookies:
-        await context.bot.send_message(msg.chat_id, "Пришлите так: /cookie name=value; name2=value2 ...")
-        return
-    ok = await asyncio.to_thread(_check_session, cookies)
-    if ok is None:
-        await context.bot.send_message(msg.chat_id, "⚠️ Сайт не отдаёт страницы с сервера (защита от ботов). Запустите /probe.")
-        return
-    if ok:
-        def save(st):
-            st["cookies"], st["auth_alert"] = cookies, ""
-        await asyncio.to_thread(store.update, save)
-    await context.bot.send_message(
-        msg.chat_id, "✅ Сессия сохранена и работает." if ok else
-        "❌ Сайт не считает вас залогиненным по этому cookie. Проверьте, что скопировали заголовок Cookie после входа.")
 
 
-def _check_session(cookies: dict) -> bool:
-    try:
-        booker.fetch_club(booker.make_session(cookies), FAVORITES[0], require_auth=True)
-        return True
-    except booker.AuthError:
-        return False
-    except booker.BlockedError:
-        return None  # сайт не отдаёт страницу серверу (защита от ботов)
 
 
-@owner_only
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    st = await asyncio.to_thread(store.load)
-    sess = "нет cookie"
-    if st["cookies"]:
-        chk = await asyncio.to_thread(_check_session, st["cookies"])
-        sess = "сайт блокирует запросы с сервера" if chk is None else ("OK" if chk else "истекла")
-    last = f"{int(time.time() - st['last_tick'])} с назад" if st["last_tick"] else "ещё не было"
-    mode = f"PerfectGym API ({pg.mask_login()})" if pg.enabled() else "сайт + cookie"
-    text = (f"Режим записи: {mode}\nСессия (cookie): {sess}\nОтслеживаний: {len(st['watches'])}\n"
-            f"Пауза: {'да' if st['paused'] else 'нет'}\nПоследняя проверка: {last}")
-    if st.get("next_hot"):
-        left = int(st["next_hot"] - time.time())
-        if left > 0:
-            text += f"\nЧастый опрос начнётся через {left // 3600} ч {left % 3600 // 60} мин"
-    if st.get("open_observed"):
-        o = st["open_observed"]
-        text += f"\nПоследнее наблюдённое открытие: {booker.flat(o['label'])} за {o['hours_before']} ч до начала"
-    if st["last_response"]:
-        text += f"\n\nОтвет сайта на последнюю запись:\n{st['last_response'][:600]}"
-    await update.effective_message.reply_text(text)
 
 
-def _probe_one(session, url, extra=None):
-    try:
-        r = session.get(url, timeout=25, headers=extra or {})
-        body = r.text
-        h = r.headers
-        hd = {k: h[k] for k in h if k.lower() in (
-            "server", "x-amzn-waf-action", "cf-mitigated", "x-cache", "via", "content-type",
-            "x-amz-cf-pop", "retry-after")}
-        cookie_names = ",".join(sorted({c.name for c in r.cookies}))[:80]
-        title = re.search(r"<title[^>]*>(.*?)</title>", body, re.S | re.I)
-        title = " ".join(title.group(1).split())[:80] if title else "-"
-        return (f"HTTP {r.status_code}, {len(body)} байт, элементов: {body.count('club-schedule-item')}\n"
-                f"заголовки: {hd}\ncookie от сайта: {cookie_names or '-'}\ntitle: {title}")
-    except Exception as exc:  # noqa: BLE001
-        return f"ошибка: {type(exc).__name__}: {str(exc)[:150]}"
 
 
-_FULL_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1",
-    "Sec-Ch-Ua": '"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0", "Sec-Ch-Ua-Platform": '"macOS"',
-}
 
 
-@owner_only
-async def probe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/probe — что сайт отдаёт серверу: обычный запрос и «как браузер»."""
-    club = FAVORITES[0]
-    url = f"https://zdrofit.pl/kluby-fitness/{club}/grafik-zajec"
-    st = await asyncio.to_thread(store.load)
-    plain = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url)
-    full = await asyncio.to_thread(_probe_one, booker.make_session(st["cookies"]), url, _FULL_HEADERS)
-    home = await asyncio.to_thread(_probe_one, booker.make_session({}), "https://zdrofit.pl/", _FULL_HEADERS)
-    await update.effective_message.reply_text(
-        f"{club}\n\n1) Обычный запрос:\n{plain}\n\n2) Как браузер:\n{full}\n\n3) Главная страница:\n{home}\n\n"
-        f"Браузер (WAF): {waf.info}")
 
 
 async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -592,9 +503,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("remove", remove_cmd))
     app.add_handler(CommandHandler("pause", _set_paused(True)))
     app.add_handler(CommandHandler("resume", _set_paused(False)))
-    app.add_handler(CommandHandler("cookie", cookie_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("probe", probe_cmd))
     app.add_handler(CommandHandler("pgtest", pgtest_cmd))
     app.add_handler(CommandHandler("myid", myid_cmd))
     app.add_handler(CommandHandler("booking", help_booking))
@@ -610,7 +519,7 @@ def register(app: Application) -> None:
 def _pgtest() -> str:
     """Проверка API PerfectGym без записи: вход, сопоставление клубов, образец расписания."""
     if not pg.enabled():
-        return "PG_LOGIN и PG_PASSWORD не заданы (Render → Environment). Бот работает через сайт и cookie."
+        return "PG_LOGIN и PG_PASSWORD не заданы (Render → Environment). Без них бот не может записывать."
     out = [f"Логин: {pg.mask_login()}"]
     try:
         pg.login(force=True)

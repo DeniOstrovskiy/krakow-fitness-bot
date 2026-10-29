@@ -119,9 +119,11 @@ async def _handle_search(
         for idx, slot in enumerate(shown_slots):
             lines.append(_format_slot(slot, tz, html_mode=True))
             m = _SLOT_URL.search(slot.url or "")
-            if m:
-                short = re.search(r"\((.+)\)", club.name)
-                short = short.group(1) if short else club.name
+            short = re.search(r"\((.+)\)", club.name)
+            short = short.group(1) if short else club.name
+            if getattr(slot, "pg_id", None):  # расписание из API PerfectGym
+                cards.append((short, slot, f"bk:{slot.club_slug}:pg{slot.pg_id}"))
+            elif m:
                 cards.append((short, slot, f"bk:{m.group(1)}:{m.group(2)}"))
             if idx < len(shown_slots) - 1:
                 lines.append("")
@@ -167,8 +169,8 @@ async def _send_cards(message, context, tz, cards, start: int, limit: int) -> No
     try:
         import store as _store
         st = await asyncio.to_thread(_store.load)
-        booked_ids = {b["id"] for b in st.get("booked", [])}
-        queued_ids = {t["id"] for t in st.get("targets", [])}
+        booked_ids = {b["id"] for b in st.get("booked", [])} | {f"pg{b['pg_id']}" for b in st.get("booked", []) if b.get("pg_id")}
+        queued_ids = {t["id"] for t in st.get("targets", [])} | {f"pg{t['pg_id']}" for t in st.get("targets", []) if t.get("pg_id")}
     except Exception:  # noqa: BLE001
         booked_ids, queued_ids = set(), set()
     for short, slot, data in cards[start:start + limit]:
@@ -231,6 +233,7 @@ STATUS_LABELS = {
     "cancelled": "❌ Отменено",
     "closed": "⛔ Запись закрыта",
     "early": "🕒 Запись ещё не открыта",
+    "booked": "✅ Вы записаны",
 }
 
 

@@ -396,3 +396,18 @@ def cancel(class_id: int):
     if st == 200 and not (isinstance(data, dict) and data.get("Errors")):
         return True, "", raw
     return False, _err_text(st, data, text), raw
+
+
+def get_class(club_slug: str, pg_id: int):
+    """Занятие по номеру PerfectGym (с тренером): детали -> неделя с этим днём -> поиск по Id."""
+    d = details(pg_id)
+    cid = d.get("ClubId") or club_id(club_slug)
+    start = dt.datetime.fromisoformat(d["StartTime"])
+    if cid:
+        items, _, _ = weekly(cid, start.date())
+        for c in items:
+            if c["Id"] == pg_id:
+                return to_item(club_slug, c)
+    c = {"Id": pg_id, "ClubId": cid, "Name": d.get("Name"), "StartTime": d["StartTime"], "Duration": d.get("Duration"),
+         "Status": d.get("Status"), "StatusReason": None, "Trainer": None, "BookingIndicator": d.get("BookingIndicator")}
+    return to_item(club_slug, c)
