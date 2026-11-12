@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Iterable, Optional
 
 _CLUB_URL = re.compile(r"/kluby-fitness/([^/?#]+)/grafik-zajec/?$")
-_PG_STATUS = {"open": "open", "full": "full", "waitlist": "waitlist", "closed": "closed", "early": "early", "booked": "booked"}
+_PG_STATUS = {"open": "open", "full": "full", "waitlist": "waitlist", "closed": "closed", "early": "early", "booked": "booked", "waiting": "waiting"}
 
 @dataclass(frozen=True)
 class Slot:

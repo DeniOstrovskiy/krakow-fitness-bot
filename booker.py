@@ -32,6 +32,7 @@ FAST_AFTER = float(os.getenv("FAST_AFTER", "30"))      # быстрая фаза
 KEEPALIVE_SECONDS = int(os.getenv("KEEPALIVE_SECONDS", "1200"))  # как часто поддерживать сессию, когда очередь пуста
 DOWN_ALERT_SECONDS = int(os.getenv("DOWN_ALERT_SECONDS", "300"))   # писать о недоступности сайта, если сбой дольше N секунд
 DOWN_REPEAT_SECONDS = int(os.getenv("DOWN_REPEAT_SECONDS", "7200"))  # и напоминать не чаще раза в N секунд
+WAITLIST_CHECK_SECONDS = int(os.getenv("WAITLIST_CHECK_SECONDS", "600"))  # как часто проверять лист ожидания (место выдаёт сам PerfectGym)
 WARM_LEAD = 10     # за столько секунд до открытия делаем «прогревающий» запрос
 HOT_LEAD = 70      # «горячее» окно начинается за 70 с до расчётного открытия
 HOT_TAIL = 600     # и длится 10 минут после (если сайт открывает с задержкой)
@@ -237,6 +238,39 @@ def _fetch_pg(ids: dict, clubs: list[str], dates: dict | None = None) -> list[di
     return out
 
 
+def _check_waitlist(st: dict) -> list[str]:
+    """Следит за листом ожидания: освободилось место и вы записаны, либо вы больше не в листе."""
+    entries = list(st.get("waitlist") or [])
+    if not entries or time.time() - st.get("last_wl", 0) < WAITLIST_CHECK_SECONDS:
+        return []
+    now_iso = now_local().isoformat()
+    promoted, left, drop = [], [], []
+    for w in entries:
+        if w["start"] <= now_iso:
+            drop.append(w)
+            continue
+        try:
+            status = pg.details(w["pg_id"]).get("Status")
+        except Exception:  # noqa: BLE001 — сеть: проверим в следующий раз
+            continue
+        s = pg.state_of(status, None)
+        if s == "booked":
+            promoted.append(w)
+        elif status in ("Bookable", "Awaitable", "FullBooked"):  # вы больше не в листе (отменили сами или убрали)
+            left.append(w)
+    gone = {w["pg_id"] for w in promoted + left + drop}
+
+    def apply(x):
+        x["last_wl"] = time.time()
+        x["waitlist"] = [w for w in x.get("waitlist") or [] if w["pg_id"] not in gone]
+        for w in promoted:
+            if not any(b.get("pg_id") == w["pg_id"] for b in x["booked"]):
+                x["booked"].append({k: w.get(k) for k in ("id", "pg_id", "label", "start", "club", "dur")})
+    store.update(apply)
+    return ([f"✅ Освободилось место, вы записаны\n{w['label']}" for w in promoted]
+            + [f"ℹ️ Вы больше не в листе ожидания\n{w['label']}" for w in left])
+
+
 def _tick_pg(st: dict):
     """Тик через API PerfectGym. Возвращает (True, сообщения)."""
     msgs: list[str] = []
@@ -249,6 +283,7 @@ def _tick_pg(st: dict):
         m = _note_down(e, "API PerfectGym")
         return True, ([m] if m else [])
 
+    msgs += _check_waitlist(st)
     watches, targets = st["watches"], st["targets"]
     clubs = sorted({w["club"] for w in watches} | {t["club"] for t in targets})
     try:
@@ -273,6 +308,14 @@ def _tick_pg(st: dict):
     pg_of: dict = {}          # id цели на сайте -> id занятия в PerfectGym
     fails = dict(st.get("pg_fail") or {})   # pg_id (строкой) -> текст последней ошибки, чтобы не сообщать повторно
     fails_now: dict = {}
+    tracked = {w["pg_id"] for w in st.get("waitlist") or []}
+    waitlist_new: list[dict] = []
+    joined_ids: set = set()
+
+    def wl_entry(it, t):
+        return {"id": t["id"] if t else it["id"], "pg_id": it["pg_id"],
+                "label": t["label"] if t and t.get("label") else label(it),
+                "start": it["start"].isoformat(), "club": it["club"], "dur": it.get("dur")}
     next_hot = 0.0
     seen_early: set = set()
     observed = None
@@ -392,6 +435,26 @@ def _tick_pg(st: dict):
                 stt = it["state"]
                 if stt == "booked":
                     continue
+                if stt == "waiting":  # вы уже в листе ожидания (например, встали в приложении): следим за ним
+                    if it["pg_id"] not in tracked:
+                        tracked.add(it["pg_id"])
+                        waitlist_new.append(wl_entry(it, t))
+                    if t:
+                        joined_ids.add(t["id"])
+                    continue
+                if stt == "waitlist" and pg.WAITLIST:  # мест нет, но есть лист ожидания: встаём в него
+                    ok, msg, raw = pg.book(it["pg_id"], it["pg_club"])
+                    last_resp = raw
+                    if ok:
+                        tracked.add(it["pg_id"])
+                        waitlist_new.append(wl_entry(it, t))
+                        if t:
+                            joined_ids.add(t["id"])
+                        fails.pop(str(it["pg_id"]), None)
+                        msgs.append(f"🟡 Встал в лист ожидания\n{label(it)}\nЕсли место освободится, вы запишетесь автоматически, я сообщу.")
+                    else:
+                        refuse(it, msg)
+                    continue
                 if stt == "early":
                     seen_early.add(it["pg_id"])
                     secs = (it["start"] - dt.timedelta(hours=OPEN_BEFORE_HOURS) - now).total_seconds()
@@ -440,7 +503,7 @@ def _tick_pg(st: dict):
         m = _note_down(e, "API PerfectGym")
         if m:
             msgs.append(m)
-    if not failed:
+    if not failed and (st.get("err_since") or st.get("down_alerted")):  # лишний раз базу не трогаем
         m = _note_up("API PerfectGym")
         if m:
             msgs.append(m)
@@ -449,7 +512,12 @@ def _tick_pg(st: dict):
 
     def save_all(x):
         x["booked"] = [b for b in x["booked"] + new_booked if b["start"] > (now - dt.timedelta(days=30)).isoformat()]
-        x["targets"] = [t for t in x["targets"] if t["id"] not in booked_ids and t["start"] > now.isoformat()]
+        x["targets"] = [t for t in x["targets"] if t["id"] not in booked_ids and t["id"] not in joined_ids
+                        and t["start"] > now.isoformat()]
+        wl = {w["pg_id"]: w for w in x.get("waitlist") or []}
+        for w in waitlist_new:
+            wl[w["pg_id"]] = w
+        x["waitlist"] = list(wl.values())
         for t in x["targets"]:
             if t["id"] in alerts:
                 t["alerted"] = alerts[t["id"]]
@@ -465,9 +533,22 @@ def _tick_pg(st: dict):
     return True, msgs
 
 
+def _waitlist_only(st: dict) -> list[str]:
+    """Очередь автозаписи пуста, но вы стоите в листе ожидания: редко проверяем только его."""
+    try:
+        pg.login()  # личный статус («Awaiting» / «Booked») виден только с токеном
+        return _check_waitlist(st)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _tick_locked() -> list[str]:
     st = store.load()
-    if st["paused"] or not (st["watches"] or st["targets"]):
+    if st["paused"]:
+        return []
+    if not (st["watches"] or st["targets"]):
+        if st.get("waitlist") and pg.enabled():
+            return _waitlist_only(st)
         return []
     if time.time() - st.get("last_tick", 0) < 20:  # защита от двойных пингов
         return []
@@ -500,6 +581,27 @@ def _book_class(st: dict, c: dict, site_id: str, club: str, lab: str, fallback: 
                 x["targets"] = [t for t in x["targets"] if t["id"] != site_id and t.get("pg_id") != c["pg_id"]]
         store.update(save)
         return f"✅ Записан\n{lab}" if ok else f"⚠️ Не удалось записаться\n{lab}\n{msg}"
+    if c["state"] == "waiting" or (c["state"] == "waitlist" and pg.WAITLIST):
+        joined = c["state"] == "waiting"
+        if not joined:
+            try:
+                ok, msg, raw = pg.book(c["pg_id"], c["pg_club"])
+            except pg.PGAuthError as e:
+                return None if fallback else f"🔑 Вход в PerfectGym не удался: {e}"
+            except Exception as e:  # noqa: BLE001
+                return f"⚠️ Ошибка записи: {e!r}"
+            if not ok:
+                return f"⚠️ Не удалось встать в лист ожидания\n{lab}\n{msg}"
+
+        def save_wl(x):
+            if not any(w["pg_id"] == c["pg_id"] for w in x.get("waitlist") or []):
+                x.setdefault("waitlist", []).append({"id": site_id, "pg_id": c["pg_id"], "label": lab,
+                                                     "start": c["start"].isoformat(), "club": club, "dur": c.get("dur")})
+            x["targets"] = [t for t in x["targets"] if t["id"] != site_id and t.get("pg_id") != c["pg_id"]]
+        store.update(save_wl)
+        if joined:
+            return f"🟡 Вы уже в листе ожидания\n{lab}"
+        return f"🟡 Встал в лист ожидания\n{lab}\nЕсли место освободится, вы запишетесь автоматически, я сообщу."
     if c["state"] in ("early", "full", "waitlist"):
         def queue(x):
             if not any(t["id"] == site_id or t.get("pg_id") == c["pg_id"] for t in x["targets"]):

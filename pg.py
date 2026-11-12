@@ -23,6 +23,7 @@ BASE = os.getenv("PG_BASE", "https://zdrofit.perfectgym.pl/ClientPortal2").strip
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Warsaw"))
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+WAITLIST = os.getenv("PG_WAITLIST", "1").strip().lower() not in ("0", "false", "no", "нет")  # вставать в лист ожидания, если мест нет
 RELOGIN_BEFORE = 600       # обновляем токен, если до его истечения меньше N секунд
 DEFAULT_TTL = 900          # если в JWT нет exp
 CLUBS_TTL = 6 * 3600
@@ -293,6 +294,8 @@ def state_of(status: str, reason) -> str:
         if "late" in r or "ended" in r:
             return "closed"
         return "unknown"
+    if s == "Awaiting":  # вы стоите в листе ожидания
+        return "waiting"
     if s.lower().startswith(("book", "regist", "attend", "reserv")):
         return "booked"
     return "unknown"

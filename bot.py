@@ -171,13 +171,16 @@ async def _send_cards(message, context, tz, cards, start: int, limit: int) -> No
         st = await asyncio.to_thread(_store.load)
         booked_ids = {b["id"] for b in st.get("booked", [])} | {f"pg{b['pg_id']}" for b in st.get("booked", []) if b.get("pg_id")}
         queued_ids = {t["id"] for t in st.get("targets", [])} | {f"pg{t['pg_id']}" for t in st.get("targets", []) if t.get("pg_id")}
+        waiting_ids = {f"pg{w['pg_id']}" for w in st.get("waitlist") or []}
     except Exception:  # noqa: BLE001
-        booked_ids, queued_ids = set(), set()
+        booked_ids, queued_ids, waiting_ids = set(), set(), set()
     for short, slot, data in cards[start:start + limit]:
         parts = data.split(":", 2)
         item_id = parts[2] if len(parts) == 3 else ""
         if item_id in booked_ids:
             btn = InlineKeyboardButton("✅ Вы записаны", callback_data="noop")
+        elif item_id in waiting_ids:
+            btn = InlineKeyboardButton("🟡 В листе ожидания", callback_data="noop")
         elif item_id in queued_ids:
             btn = InlineKeyboardButton("⏳ Жду открытия записи · отменить", callback_data=f"uq:{parts[1]}:{item_id}")
         else:
@@ -234,6 +237,7 @@ STATUS_LABELS = {
     "closed": "⛔ Запись закрыта",
     "early": "🕒 Запись ещё не открыта",
     "booked": "✅ Вы записаны",
+    "waiting": "🟡 Вы в листе ожидания",
 }
 
 

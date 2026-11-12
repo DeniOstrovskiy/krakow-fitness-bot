@@ -230,12 +230,19 @@ def _build_list(st):
     for i, t in enumerate(st["targets"], len(st["watches"]) + 1):
         blocks.append(f"{i}. ⏳ {booker.rich_label(t['label'])}\n(ждёт, когда можно будет записаться)")
         rows.append([InlineKeyboardButton(f"❌ Отменить {i}", callback_data=f"lr:{t['id']}")])
-    future = [b for b in st["booked"] if b["start"] > booker.now_local().isoformat()]
+    now_iso = booker.now_local().isoformat()
+    wl = sorted((w for w in st.get("waitlist") or [] if w["start"] > now_iso), key=lambda w: w["start"])
+    if wl:
+        blocks.append("<b>В листе ожидания:</b>")
+        for n, w in enumerate(wl, 1):
+            blocks.append(f"🟡 {booker.rich_label(w['label'])}")
+            rows.append([InlineKeyboardButton(f"❌ Выйти из листа {n}", callback_data=f"lw:{w['pg_id']}")])
+    future = [b for b in st["booked"] if b["start"] > now_iso]
     if future:
         blocks.append("<b>Записан:</b>")
         blocks += [f"📅 {booker.rich_label(b['label'])}"
                    for b in sorted(future, key=lambda b: b["start"])]
-        rows.append([InlineKeyboardButton("🔄 Сверить «Записан» с сайтом", callback_data="sync")])
+        rows.append([InlineKeyboardButton("🔄 Сверить «Записан»", callback_data="sync")])
     if st["paused"]:
         blocks.append("⏸ Бот на паузе")
     return "\n\n".join(blocks), (InlineKeyboardMarkup(rows) if rows else None)
@@ -274,6 +281,38 @@ async def list_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text, markup = await asyncio.to_thread(store.update, rm)
     await q.answer("Отменено")
+    try:
+        await q.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def list_leave_wait_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    owner = _owner_id()
+    if not owner or q.from_user.id != owner:
+        await q.answer("Нет доступа", show_alert=True)
+        return
+    pg_id = int(q.data.split(":", 1)[1])
+
+    def work():
+        pg.login()
+        ok, msg, raw = pg.cancel(pg_id)
+        if ok:
+            def rm(st):
+                st["waitlist"] = [w for w in st.get("waitlist") or [] if w["pg_id"] != pg_id]
+            store.update(rm)
+        return ok, msg
+
+    try:
+        ok, msg = await asyncio.wait_for(asyncio.to_thread(work), 30)
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, repr(e)
+    if not ok:
+        await q.answer(f"Не удалось выйти из листа: {msg}"[:190], show_alert=True)
+        return
+    await q.answer("Вы вышли из листа ожидания")
+    text, markup = _build_list(await asyncio.to_thread(store.load))
     try:
         await q.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
     except Exception:
@@ -423,6 +462,8 @@ async def book_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     t.update(chat_id=msg.chat_id, message_id=msg.message_id, card_html=card_html)
         await asyncio.to_thread(store.update, remember)
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("⏳ Жду открытия записи · отменить", callback_data=f"uq:{club}:{item_id}")]])
+    elif text.startswith("🟡"):
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🟡 В листе ожидания", callback_data="noop")]])
     elif text.startswith(("✅", "Вы уже записаны")):
         markup = DONE_MARKUP
     elif text.startswith(("🔑", "⚠️")):  # при ошибке кнопка остаётся
@@ -510,6 +551,7 @@ def register(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(book_callback, pattern=r"^bk:"))
     app.add_handler(CallbackQueryHandler(unqueue_callback, pattern=r"^uq:"))
     app.add_handler(CallbackQueryHandler(list_remove_callback, pattern=r"^lr:"))
+    app.add_handler(CallbackQueryHandler(list_leave_wait_callback, pattern=r"^lw:"))
     app.add_handler(CallbackQueryHandler(sync_callback, pattern=r"^sync$"))
     app.add_handler(CommandHandler("sync", sync_cmd))
     app.add_handler(CommandHandler("calendar", calendar_cmd))
