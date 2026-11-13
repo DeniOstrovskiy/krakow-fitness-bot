@@ -186,19 +186,56 @@ def resolve_activity(club: str, q: str):
     return None, "Уточните, их несколько: " + ", ".join(sorted(hits))
 
 
+def _import_pg() -> tuple[list, list]:
+    """Находит в PerfectGym записи, сделанные не через бота (например, в приложении), и добавляет их в список."""
+    pg.login()
+    st = store.load()
+    clubs = sorted(set(FAVORITES) | {b["club"] for b in st["booked"] if b.get("club")})
+    ids = {c: pg.club_id(c) for c in clubs}
+    items = booker._fetch_pg(ids, [c for c in clubs if ids[c]])  # статусы с вашим токеном: «Booked» / «Awaiting» — ваши
+    now = booker.now_local()
+    known = {b.get("pg_id") for b in st["booked"]}
+    known_cs = {(b.get("club"), b["start"]) for b in st["booked"]}
+    wl_known = {w["pg_id"] for w in st.get("waitlist") or []}
+    new_b, new_w = [], []
+    for it in items:
+        if it["start"] <= now:
+            continue
+        e = {"id": it["id"], "pg_id": it["pg_id"], "label": booker.label(it), "start": it["start"].isoformat(),
+             "club": it["club"], "dur": it.get("dur")}
+        if it["state"] == "booked" and it["pg_id"] not in known and (it["club"], e["start"]) not in known_cs:
+            new_b.append(e)
+        elif it["state"] == "waiting" and it["pg_id"] not in wl_known:
+            new_w.append(e)
+    if new_b or new_w:
+        def apply(x):
+            have = {b.get("pg_id") for b in x["booked"]}
+            x["booked"] += [e for e in new_b if e["pg_id"] not in have]
+            have_w = {w["pg_id"] for w in x.get("waitlist") or []}
+            x.setdefault("waitlist", []).extend(e for e in new_w if e["pg_id"] not in have_w)
+            done = {e["pg_id"] for e in new_b + new_w}
+            x["targets"] = [t for t in x["targets"] if t.get("pg_id") not in done]
+        store.update(apply)
+    return new_b, new_w
+
+
 def _sync_booked() -> str:
-    """Сверяет «Записан» с PerfectGym: убирает занятия, на которые вы уже не записаны."""
+    """Сверяет «Записан» с PerfectGym: убирает отменённые и добавляет записи, сделанные в приложении."""
+    if not pg.enabled():
+        return "Не заданы PG_LOGIN и PG_PASSWORD, сверять не с чем."
     st = store.load()
     now = booker.now_local().isoformat()
     todo = [b for b in st["booked"] if b["start"] > now]
-    if not todo:
-        return "Сверять нечего."
-    if not pg.enabled():
-        return "Не заданы PG_LOGIN и PG_PASSWORD, сверять не с чем."
+    parts = []
     try:
-        return _sync_booked_pg(todo)
+        if todo:
+            parts.append(_sync_booked_pg(todo))
+        new_b, new_w = _import_pg()
+        parts += [f"➕ Добавлено из приложения: {booker.flat(e['label'])}" for e in new_b]
+        parts += [f"➕ Лист ожидания (из приложения): {booker.flat(e['label'])}" for e in new_w]
     except Exception as e:  # noqa: BLE001
-        return f"⚠️ Сверка через PerfectGym не удалась: {e!r}"
+        parts.append(f"⚠️ Сверка через PerfectGym не удалась: {e!r}")
+    return "\n".join(parts) if parts else "Сверка: изменений нет."
 
 
 @owner_only
@@ -252,10 +289,10 @@ def _build_list(st):
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     notes = []
     st0 = await asyncio.to_thread(store.load)
-    if st0["booked"]:  # каждый раз сверяем «Записан» с сайтом; при сбое просто показываем список как есть
+    if pg.enabled():  # каждый раз сверяем «Записан» с PerfectGym; при сбое просто показываем список как есть
         try:
             rep = await asyncio.wait_for(asyncio.to_thread(_sync_booked), 30)
-            notes = [html.escape(l) for l in rep.splitlines() if l.startswith("✖")]
+            notes = [html.escape(l) for l in rep.splitlines() if l.startswith(("✖", "➕"))]
         except Exception:  # noqa: BLE001
             pass
     st = await asyncio.to_thread(store.load)
