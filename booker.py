@@ -250,7 +250,7 @@ def _check_waitlist(st: dict) -> list[str]:
             drop.append(w)
             continue
         try:
-            status = pg.details(w["pg_id"]).get("Status")
+            status = pg.details_auth(w["pg_id"]).get("Status")
         except Exception:  # noqa: BLE001 — сеть: проверим в следующий раз
             continue
         s = pg.state_of(status, None)

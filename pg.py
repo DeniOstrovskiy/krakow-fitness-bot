@@ -280,6 +280,14 @@ def details(class_id: int) -> dict:
     return data
 
 
+def details_auth(class_id: int) -> dict:
+    """Детали занятия строго с вашим токеном: поле Status тогда личное («Booked», «Awaiting», ...)."""
+    st, data, _, text = _authed("POST", "Classes/ClassCalendar/Details", {"classId": class_id})
+    if st != 200 or not isinstance(data, dict):
+        raise PGError(f"детали занятия {class_id}: HTTP {st} {text[:100]}")
+    return data
+
+
 def state_of(status: str, reason) -> str:
     s, r = (status or ""), (reason or "").lower()
     if s == "Bookable":

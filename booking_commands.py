@@ -336,10 +336,10 @@ def _sync_booked_pg(todo: list) -> str:
         if not pid:
             unknown.append(booker.flat(b["label"]))
             continue
-        status = pg.details(pid).get("Status")
+        status = pg.details_auth(pid).get("Status")
         if pg.state_of(status, None) == "booked":
             kept += 1
-        elif status == "Bookable":  # занятие снова доступно для записи — значит, вы отписались
+        elif status in ("Bookable", "Awaitable", "FullBooked"):  # у вас нет записи: отписались (в приложении или иначе)
             removed.append(b)
         else:
             unknown.append(f"{booker.flat(b['label'])} (статус {status})")
@@ -602,7 +602,7 @@ def _pgtest() -> str:
     mine = [b for b in st["booked"] if b.get("pg_id") and b["start"] > booker.now_local().isoformat()][:3]
     for b in mine:
         try:
-            out.append(f"Мой статус «{booker.flat(b['label'])}»: {pg.details(b['pg_id']).get('Status')}")
+            out.append(f"Мой статус «{booker.flat(b['label'])}»: {pg.details_auth(b['pg_id']).get('Status')}")
         except Exception as e:  # noqa: BLE001
             out.append(f"⚠️ Детали занятия: {e!r}")
     out.append("\nЗаписей этой командой не делается.")
